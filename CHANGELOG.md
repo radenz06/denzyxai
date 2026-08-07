@@ -4,6 +4,28 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.5.0] - 2026-08-07
+
+### Ditambahkan
+- **STT jernih dengan faster-whisper.** Voice chat sekarang dengar pakai
+  whisper neural offline (model `base` int8, bahasa Indonesia) — jauh
+  lebih akurat daripada STT Android. `pip install faster-whisper`.
+  Opsi `--stt auto|whisper|termux`, `--stt-model <size>` (default
+  `base`), `--record-seconds` (default 6). Auto fallback ke
+  `termux-speech-to-text` kalau whisper tidak tersedia.
+- **Suara lebih natural: Google Translate TTS langsung** (tanpa
+  dependency eksternal, langsung via `urllib`). Suara wanita Google
+  bahasa Indonesia. Rantai baru: google → edge (GadisNeural) → android.
+
+### Diubah
+- `--engine auto` sekarang mencoba `google` dulu, lalu `edge`, lalu
+  `android`. `--engine google` bisa dipakai untuk memaksa.
+- Teks dibacain TTS dibersihkan dulu (`_tts_text`): markdown, emoji,
+  dan simbol (`%`, `&`, `+`, ...) dihapus/diganti biar bacaan natural.
+- Sitem prompt khusus selama panggilan suara minta AI jawab ringkas dan
+  tidak mengulang/mencerminkan kata-kata user (anti gema).
+- Default `--lang` sekarang `id-ID`.
+
 ## [2.4.0] - 2026-08-07
 
 ### Diubah

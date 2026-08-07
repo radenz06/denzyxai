@@ -123,7 +123,7 @@ SESSION_DIR = Path(__file__).resolve().parent / "sessions"
 CRASH_LOG = Path(os.path.expanduser("~/.denzyx_crash.log"))
 
 APP_NAME = "denzyx AI"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 
 _CLI_HELP = """\
 denzyx AI v{ver} — AI agent buat Termux
@@ -134,7 +134,8 @@ Cara pakai:
   ./denzyx --help         bantuan ini
 
 Opsi tambahan yang diteruskan ke mode voice (lihat voice-denz.py):
-  --voice --lang id-ID --rate 1.1 --wake denz --no-tts --listen-once
+  --voice --lang id-ID --stt whisper --stt-model base --engine auto
+         --rate 1.1 --wake denz --no-tts --listen-once
 """.format(ver=APP_VERSION)
 AUTH_PATHS = [
     Path(os.path.expanduser("~/.local/share/opencode/auth.json")),

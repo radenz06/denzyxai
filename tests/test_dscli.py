@@ -279,3 +279,26 @@ def test_voice_cli_help():
         ["python3", os.path.join(root, "denzyx.py"), "--help"],
         capture_output=True, text=True, timeout=30)
     assert "voice" in r.stdout.lower()
+
+
+def test_voice_tts_text_buang_emoji():
+    v = _load_voice()
+    assert v._tts_text("Halo 😀 apa kabar ✨?") == "Halo apa kabar ?"
+    assert v._tts_text("**Bold** ya") == "Bold ya"
+
+
+def test_voice_tts_text_ganti_simbol():
+    v = _load_voice()
+    assert v._tts_text("Diskon 50% + ongkir 5&5") == \
+        "Diskon 50 persen plus ongkir 5 dan 5"
+
+
+def test_voice_stt_whisper_ok_boolean():
+    v = _load_voice()
+    assert isinstance(v._stt_whisper_ok(), bool)
+
+
+def test_voice_speak_chain_default():
+    v = _load_voice()
+    assert v.DEFAULT_STT_MODEL == "base"
+    assert v.speak.__defaults__[-1] == "id"

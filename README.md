@@ -37,9 +37,10 @@ tapi serius kalau disuruh kerja.
   ekstra: ssh, download, serve (HTTP server), bg (job background),
   root (su), media, screenshot, dan sys.
 - **Voice chat** (`voice-denz.py`) — panggilan suara ke AI: kamu ngomong,
-  dia denger (STT on-device Android via `termux-speech-to-text`), lalu
-  jawab disuarakan (`termux-tts-speak`). Buka lewat menu "Voice Chat" atau
-  `./denzyx --voice`. Percakapan ikut tersimpan di riwayat sesi.
+  dia denger **jernih** (faster-whisper neural offline; fallback STT
+  Android), lalu jawab disuarakan **cewe natural** (Google TTS → edge-tts
+  → TTS Android). Buka lewat menu "Voice Chat" atau `./denzyx --voice`.
+  Percakapan ikut tersimpan di riwayat sesi.
 - **Mode auto 24 jam** (`auto-denz.py`) — baca notifikasi, bales pakai AI
   (gaya persona yang sama), vibrate/TTS, monitor baterai, tahan hidup
   lewat termux-job-scheduler + boot script, dan nggak mati waktu offline
@@ -82,27 +83,31 @@ butuh package `termux-api`. Untuk auto-daemon butuh `termux-api` juga
 
 ## Voice chat
 
-Panggilan suara: kamu ngomong → `termux-speech-to-text` (STT on-device
-Android, tanpa server) → AI jawab → disuarakan dengan **suara cewe**
-(edge-tts `id-ID-GadisNeural`, neural & natural). Bilang "stop" buat
-menutup panggilan.
+Panggilan suara: kamu ngomong → **STT jernih** (faster-whisper neural
+offline, model `base`, bahasa Indonesia — fallback `termux-speech-to-text`)
+→ AI jawab ringkas → disuarakan dengan **suara cewe natural** (Google
+Translate TTS bahasa Indonesia → edge-tts `id-ID-GadisNeural` → TTS
+Android). Bilang "stop" buat menutup panggilan.
 
 ```sh
-pip install edge-tts            # sekali — suara neural cewe (butuh internet)
+pip install faster-whisper      # sekali — STT jernih offline (sangat disarankan)
 ./denzyx --voice                # dari menu: pilih "Voice Chat"
-./denzyx --voice --lang id-ID   # atur bahasa STT
+./denzyx --voice --lang id-ID   # bahasa STT + TTS (default id-ID)
 ./denzyx --voice --rate 1.1     # kencangin ngomong
-./denzyx --voice --voice-name id-ID-GadisNeural   # ganti suara
-./denzyx --voice --engine android                 # paksa TTS Android
+./denzyx --voice --stt whisper  # paksa STT whisper (atau --stt termux)
+./denzyx --voice --stt-model small    # model whisper lebih akurat (lebih lambat)
+./denzyx --voice --engine google      # google | edge | android | auto
+./denzyx --voice --voice-name id-ID-GadisNeural   # ganti suara edge-tts
 ./denzyx --voice --wake denz    # cuma respons kalau dipanggil "denz"
 ./denzyx --voice --no-tts       # mode bisu: cuma teks
 ```
 
-Kalau edge-tts nggak kebagian internet, otomatis turun ke TTS Android
-bahasa Indonesia (di Google TTS biasanya juga cewe). Butuh package
-`termux-api` + izin mikrofon buat Termux (muncul otomatis pas pertama
-kali dengar). Percakapan tersimpan seperti chat biasa dan muncul di
-"Riwayat Sesi".
+`--engine auto` mencoba Google TTS (tanpa dependency) → edge-tts →
+TTS Android. Google TTS & edge-tts butuh internet; tanpa internet,
+otomatis turun ke TTS Android bahasa Indonesia (di Google TTS biasanya
+juga cewe). Butuh package `termux-api` + izin mikrofon buat Termux
+(muncul otomatis pas pertama kali dengar). Percakapan tersimpan seperti
+chat biasa dan muncul di "Riwayat Sesi".
 
 ## Konfigurasi
 
