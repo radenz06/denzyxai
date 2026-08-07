@@ -4,6 +4,17 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.4.0] - 2026-08-07
+
+### Diubah
+- **Voice chat sekarang suara cewe.** Jawaban disuarakan pakai edge-tts
+  `id-ID-GadisNeural` (suara wanita Indonesia, neural, natural — kayak
+  telponan beneran). Butuh `pip install edge-tts`. Kalau edge-tts gagal
+  (offline/down), auto fallback ke TTS Android bahasa Indonesia
+  (`termux-tts-speak -l id-ID`).
+- `--voice-name <voice>` buat ganti suara edge-tts, `--engine edge|android`
+  buat paksa mesin suara, `--rate` diteruskan ke edge-tts.
+
 ## [2.3.0] - 2026-08-07
 
 ### Ditambahkan

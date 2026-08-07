@@ -2,20 +2,29 @@
 """voice-denz.py — panggilan suara ke denzyx AI.
 
 Dengar pakai termux-speech-to-text (STT on-device Android, tanpa server),
-ngomong balik pakai termux-tts-speak. Percakapan disimpan ke sessions/
-biar muncul di riwayat TUI. Reuse mesin chat dari denzyx.py (retry,
-fallback key, persona dari system_prompt.md).
+jawab disuarakan dengan SUARA CEWE: edge-tts voice id-ID-GadisNeural
+(neural, natural — gratis, butuh internet). Kalau edge-tts gagal,
+fallback ke termux-tts-speak bahasa Indonesia (suara ikut pengaturan
+TTS Android, di Google TTS biasanya cewe). Percakapan disimpan ke
+sessions/ biar muncul di riwayat TUI. Reuse mesin chat dari denzyx.py
+(retry, fallback key, persona dari system_prompt.md).
+
+Dependency tambahan (opsional, sangat disarankan):
+    pip install edge-tts
 
 Cara pakai:
     python3 voice-denz.py                 # mode call: terus dengar
     python3 voice-denz.py --listen-once   # dengar sekali, terus keluar
     python3 voice-denz.py --lang id-ID    # bahasa STT (default sistem)
+    python3 voice-denz.py --voice-name id-ID-GadisNeural   # pilih suara
+    python3 voice-denz.py --engine android                 # paksa TTS Android
     python3 voice-denz.py --no-tts        # tanpa suara, cuma teks
     python3 voice-denz.py --wake denz     # cuma respons kalau kata kunci
 Bilang "stop" / "matikan" buat menutup panggilan.
 """
 
 import argparse
+import glob
 import os
 import queue
 import re
@@ -23,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +40,12 @@ import denzyx  # noqa: E402
 
 EXIT_WORDS = ("stop", "matikan", "putus", "selesai", "keluar", "bye",
               "exit", "tutup", "sampai jumpa", "udahan", "sudah")
+
+# Folder TTS harus bisa dibaca app Termux (bukan /root dsb).
+TERMUX_HOME = "/data/data/com.termux/files/home"
+AUDIO_DIR = os.environ.get("DENZYX_TTS_DIR") or os.path.join(
+    TERMUX_HOME, ".denzyx", "tts")
+DEFAULT_VOICE = os.environ.get("DENZYX_TTS_VOICE") or "id-ID-GadisNeural"
 
 
 def _which(cmd):
@@ -78,20 +94,121 @@ def listen(lang=None, timeout=25):
     return out, None
 
 
-def speak(text, rate=1.0, pitch=1.0):
-    """Ucapkan teks via termux-tts-speak (blocking biar mic nggak ketangkep)."""
+def _edge_rate(rate):
+    """Ubah kecepatan float ke format edge-tts: 1.1 -> '+10%'."""
+    pct = int(round((float(rate) - 1.0) * 100))
+    return f"{pct:+d}%"
+
+
+def _synth_mp3(text, out_path, voice, rate):
+    exe = _which("edge-tts")
+    if not exe:
+        return None, "edge-tts belum terinstall (pip install edge-tts)"
+    try:
+        proc = subprocess.run(
+            [exe, "--voice", voice, "--rate", _edge_rate(rate),
+             "--text", text, "--write-media", out_path],
+            capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return None, "edge-tts timeout"
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        return None, (proc.stderr or "").strip()[:200] or "edge-tts gagal"
+    return out_path, None
+
+
+def _play_mp3(path):
+    """Putar mp3 sampai habis (blocking) via termux-media-player.
+    Durasi dihitung ffprobe, tidur sesuai durasi — biar mic nggak
+    nangkep suara sendiri waktu mau dengar lagi."""
+    player = _which("termux-media-player")
+    if not player:
+        return "termux-media-player tidak ada — pkg install termux-api"
+    dur = 1.0
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=20)
+        dur = float((r.stdout or "1").strip()) or 1.0
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        subprocess.run([player, "play", path], capture_output=True, text=True,
+                       timeout=30)
+        time.sleep(min(dur + 0.6, 90))
+        subprocess.run([player, "stop"], capture_output=True, text=True,
+                       timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+    return ""
+
+
+def _speak_android(text, rate, pitch):
+    """Fallback TTS Android, bahasa id-ID (di Google TTS biasanya cewe).
+    Versi termux-api beda-beda: ada yang nggak punya opsi -b (block),
+    jadi tidur sesuai perkiraan durasi biar mic nggak nangkep suara."""
     exe = _which("termux-tts-speak")
     if not exe:
         return "TTS tidak tersedia — pkg install termux-api"
-    argv = [exe, "-r", str(rate), "-p", str(pitch), "-b"]
+    est = min(max(1.0, len(text) / 14.0 / float(rate)), 30)
+    argv = [exe, "-l", "id-ID", "-r", str(rate), "-p", str(pitch)]
     try:
+        t0 = time.monotonic()
         proc = subprocess.run(argv, input=text, capture_output=True,
                               text=True, timeout=300)
-        return (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        err = (proc.stderr or "").strip()
+        if "illegal option" in err:
+            argv = [exe, "-l", "id-ID"]
+            subprocess.run(argv, input=text, capture_output=True, text=True,
+                           timeout=300)
+            err = ""
+        rest = est - (time.monotonic() - t0)
+        if rest > 0:
+            time.sleep(min(rest, 30))
+        return err
     except subprocess.TimeoutExpired:
         return "TTS timeout"
     except Exception as e:  # noqa: BLE001
         return str(e)
+
+
+def _tts_cleanup():
+    """Buang mp3 lama (>1 hari) di folder audio biar nggak numpuk."""
+    try:
+        now = time.time()
+        for f in glob.glob(os.path.join(AUDIO_DIR, "denz_*.mp3")):
+            if now - os.path.getmtime(f) > 86400:
+                os.unlink(f)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def speak(text, rate=1.0, pitch=1.0, voice=DEFAULT_VOICE, engine="auto"):
+    """Ucapkan teks dengan SUARA CEWE: edge-tts (GadisNeural) dulu,
+    gagal → TTS Android bahasa Indonesia. Blocking."""
+    engine = (engine or "auto").lower()
+    try:
+        os.makedirs(AUDIO_DIR, exist_ok=True)
+    except OSError:
+        pass
+    _tts_cleanup()
+    if engine in ("auto", "edge"):
+        path = os.path.join(AUDIO_DIR, f"denz_{int(time.time() * 1000)}.mp3")
+        out, err = _synth_mp3(text, path, voice, rate)
+        if out:
+            play_err = _play_mp3(out)
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+            if play_err:
+                return play_err
+            return ""
+        if engine == "edge":
+            return f"edge-tts: {err}"
+    return _speak_android(text, rate, pitch)
 
 
 def ask(state, prompt):
@@ -134,6 +251,12 @@ def main():
     ap.add_argument("--wake", help="kata kunci opsional, mis. 'denz'")
     ap.add_argument("--listen-timeout", type=int, default=25,
                     help="maks. detik menunggu ucapan (default 25)")
+    ap.add_argument("--voice-name", default=DEFAULT_VOICE,
+                    help=f"suara edge-tts (default {DEFAULT_VOICE})")
+    ap.add_argument("--engine", choices=["auto", "edge", "android"],
+                    default="auto",
+                    help="edge = neural cewe (butuh internet), android = TTS "
+                         "device, auto = coba edge dulu")
     args = ap.parse_args()
 
     state = denzyx.State()
@@ -147,16 +270,19 @@ def main():
         out("Denz: " + text)
         if not args.no_tts and text:
             msg = speak(_plain(text)[:4000], rate=args.rate,
-                        pitch=args.pitch)
+                        pitch=args.pitch, voice=args.voice_name,
+                        engine=args.engine)
             if msg and "tidak tersedia" in msg:
                 err(msg)
 
     out("=== 📞 Panggilan suara — denzyx AI ===")
     if args.wake:
         out(f"Mode wake: sebut '{args.wake}' dulu biar direspons.")
-    out("Bilang \"stop\" buat menutup panggilan.")
+    out(f"Suara: {args.voice_name} ({args.engine}) — bilang \"stop\" buat "
+        "menutup panggilan.")
     if not args.no_tts:
-        speak("Denzyx siap, silakan bicara.", rate=args.rate, pitch=args.pitch)
+        speak("Denzyx siap, silakan bicara.", rate=args.rate, pitch=args.pitch,
+              voice=args.voice_name, engine=args.engine)
     else:
         out("[Denz] Denzyx siap, silakan bicara.")
 
@@ -216,7 +342,8 @@ def main():
     except KeyboardInterrupt:
         out("\n[dibatalkan]")
         if not args.no_tts:
-            speak("Sampai jumpa.", rate=args.rate, pitch=args.pitch)
+            speak("Sampai jumpa.", rate=args.rate, pitch=args.pitch,
+                  voice=args.voice_name, engine=args.engine)
     out("\n=== 📞 Panggilan ditutup ===")
     return 0
 

@@ -83,20 +83,26 @@ butuh package `termux-api`. Untuk auto-daemon butuh `termux-api` juga
 ## Voice chat
 
 Panggilan suara: kamu ngomong → `termux-speech-to-text` (STT on-device
-Android, tanpa server) → AI jawab → disuarakan `termux-tts-speak`.
-Bilang "stop" buat menutup panggilan.
+Android, tanpa server) → AI jawab → disuarakan dengan **suara cewe**
+(edge-tts `id-ID-GadisNeural`, neural & natural). Bilang "stop" buat
+menutup panggilan.
 
 ```sh
-./denzyx --voice                    # dari menu: pilih "Voice Chat"
-./denzyx --voice --lang id-ID       # atur bahasa STT
-./denzyx --voice --rate 1.1         # kencangin TTS
-./denzyx --voice --wake denz        # cuma respons kalau dipanggil "denz"
-./denzyx --voice --no-tts           # mode bisu: cuma teks
+pip install edge-tts            # sekali — suara neural cewe (butuh internet)
+./denzyx --voice                # dari menu: pilih "Voice Chat"
+./denzyx --voice --lang id-ID   # atur bahasa STT
+./denzyx --voice --rate 1.1     # kencangin ngomong
+./denzyx --voice --voice-name id-ID-GadisNeural   # ganti suara
+./denzyx --voice --engine android                 # paksa TTS Android
+./denzyx --voice --wake denz    # cuma respons kalau dipanggil "denz"
+./denzyx --voice --no-tts       # mode bisu: cuma teks
 ```
 
-Butuh package `termux-api` + izin mikrofon buat Termux (muncul otomatis
-pas pertama kali dengar). Percakapan tersimpan seperti chat biasa dan
-muncul di "Riwayat Sesi".
+Kalau edge-tts nggak kebagian internet, otomatis turun ke TTS Android
+bahasa Indonesia (di Google TTS biasanya juga cewe). Butuh package
+`termux-api` + izin mikrofon buat Termux (muncul otomatis pas pertama
+kali dengar). Percakapan tersimpan seperti chat biasa dan muncul di
+"Riwayat Sesi".
 
 ## Konfigurasi
 

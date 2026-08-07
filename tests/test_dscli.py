@@ -260,6 +260,18 @@ def test_voice_is_exit():
     assert not v._is_exit("gimana cara stop kontak dicolok")
 
 
+def test_voice_edge_rate():
+    v = _load_voice()
+    assert v._edge_rate(1.0) == "+0%"
+    assert v._edge_rate(1.1) == "+10%"
+    assert v._edge_rate(0.9) == "-10%"
+
+
+def test_voice_default_suaranya_cewe():
+    v = _load_voice()
+    assert v.DEFAULT_VOICE == "id-ID-GadisNeural"
+
+
 def test_voice_cli_help():
     import subprocess
     root = os.path.dirname(os.path.dirname(__file__))
