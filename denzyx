@@ -1,0 +1,25 @@
+#!/bin/sh
+# denzyx — launcher global (resolver).
+# Cari folder app: 1) $DENZYX_DIR  2) storage Android
+# 3) ~/.local/share/denzyx (hasil installer).
+# Folder tempat kamu mengetik perintah ini jadi folder kerja AI.
+for APP_DIR in \
+    "$DENZYX_DIR" \
+    "/storage/emulated/0/denzyx ai" \
+    "$HOME/.local/share/denzyx"; do
+    if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/denzyx.py" ]; then
+        break
+    fi
+    APP_DIR=""
+done
+if [ -z "$APP_DIR" ]; then
+    echo "denzyx: file app tidak ditemukan."
+    echo "Set DENZYX_DIR ke folder yang berisi denzyx.py"
+    exit 1
+fi
+if [ -x /data/data/com.termux/files/usr/bin/python3 ]; then
+    PY=/data/data/com.termux/files/usr/bin/python3
+else
+    PY=python3
+fi
+exec "$PY" "$APP_DIR/denzyx.py" "$@"

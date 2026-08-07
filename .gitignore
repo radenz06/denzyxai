@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+sessions/
+*.log
+*.pid
+*.jpg
+*.png
+local.properties
+.env
+.env.*
+*.key
+.denzyx/
+.android/
