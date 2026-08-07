@@ -10,8 +10,10 @@ Modul ini hanya menyediakan definisi tool yang dipakai app utama:
 App utama (denzyx.py) import ketiga simbol ini via `import dscli`.
 """
 
+import glob
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import urllib.parse
@@ -465,6 +467,196 @@ TOOLS = [
                                             "workdir, command"},
                 },
                 "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh",
+            "description": "Akses mesin lain lewat SSH. action: run (jalankan "
+                           "perintah di remote), copy (kirim file lokal ke "
+                           "remote via scp), fetch (ambil file dari remote). "
+                           "Contoh: ssh(action='run', host='user@192.168.1.5', "
+                           "command='uptime').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "run | copy | fetch "
+                                              "(default run)"},
+                    "host": {"type": "string",
+                             "description": "host tujuan: user@alamat_ip "
+                                            "(wajib)"},
+                    "command": {"type": "string",
+                                "description": "perintah shell yang dijalankan "
+                                               "di remote (action=run)"},
+                    "path": {"type": "string",
+                             "description": "file lokal (action=copy) atau "
+                                            "tujuan simpan (action=fetch)"},
+                    "remote": {"type": "string",
+                               "description": "path di remote "
+                                              "(action=copy/fetch)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download",
+            "description": "Unduh file dari URL ke disk lokal pakai curl/wget, "
+                           "dengan retry dan resume. Contoh: "
+                           "download(url='https://...', output='~/file.zip').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string",
+                            "description": "URL file (wajib)"},
+                    "output": {"type": "string",
+                               "description": "path tujuan (opsional, default "
+                                              "nama dari URL)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "serve",
+            "description": "Server HTTP lokal buat berbagi file dari HP ke "
+                           "perangkat lain (PC di wifi yang sama). action: "
+                           "start (jalankan di background), stop, status. "
+                           "Contoh: serve(action='start', path='.', port=8080).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "start | stop | status "
+                                              "(default status)"},
+                    "path": {"type": "string",
+                             "description": "folder yang dibagikan "
+                                            "(default cwd)"},
+                    "port": {"type": "integer",
+                             "description": "port HTTP (default 8080)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bg",
+            "description": "Jalankan perintah di background (nohup) yang tetap "
+                           "hidup walau chat ditutup, lalu kelola: list, tail "
+                           "(lihat log), kill. Contoh: bg(action='start', "
+                           "name='train', command='python3 train.py'); "
+                           "bg(action='tail', name='train').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "start | list | tail | kill "
+                                              "(default list)"},
+                    "name": {"type": "string",
+                             "description": "nama job (start/tail/kill)"},
+                    "command": {"type": "string",
+                                "description": "perintah shell (action=start)"},
+                    "lines": {"type": "integer",
+                              "description": "jumlah baris log terakhir "
+                                             "(default 30)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "root",
+            "description": "Eksekusi perintah dengan akses root (su), kalau "
+                           "perangkat di-root. action: check (cek su tersedia), "
+                           "exec (jalankan perintah sebagai root). Contoh: "
+                           "root(action='exec', command='ls /data').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "check | exec (default check)"},
+                    "command": {"type": "string",
+                                "description": "perintah yang dijalankan "
+                                               "sebagai root (action=exec)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "media",
+            "description": "Multimedia: play (putar file audio/video lewat "
+                           "termux-media-player), stop, record (rekam suara "
+                           "lewat termux-microphone-record), info (detail "
+                           "file pakai ffprobe). Contoh: "
+                           "media(action='play', file='musik.mp3').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "play | stop | record | info "
+                                              "(default info)"},
+                    "file": {"type": "string",
+                             "description": "path file audio/video "
+                                            "(action=play/info)"},
+                    "output": {"type": "string",
+                               "description": "path rekaman audio "
+                                              "(action=record, default "
+                                              "~/recording.m4a)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot",
+            "description": "Ambil screenshot layar HP (butuh termux-api). "
+                           "Contoh: screenshot(path='~/ss.png', delay=0). "
+                           "Path opsional; default di folder Pictures.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string",
+                             "description": "path simpan PNG (opsional)"},
+                    "delay": {"type": "integer",
+                              "description": "tunda detik sebelum capture "
+                                             "(default 0)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sys",
+            "description": "Info sistem sekilas: OS, uptime, CPU, memori, "
+                           "disk, alamat IP. Bagus buat cek kondisi sebelum "
+                           "kerjaan berat. Contoh: sys() atau "
+                           "sys(section='mem').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "section": {"type": "string",
+                                "description": "all | os | cpu | mem | disk | "
+                                               "net (default all)"},
+                },
+                "required": [],
             },
         },
     },
@@ -1462,6 +1654,245 @@ def tool_sdk(action="check", args=None):
             "list, adb.")
 
 
+# ---------------------------------------------------------------------------
+# Akses & otomasi: ssh, download, serve, bg, root, media, screenshot, sys
+# ---------------------------------------------------------------------------
+
+_RUN_DIR = os.path.expanduser("~/.denzyx/run")
+
+
+def _run_dir():
+    Path(_RUN_DIR).mkdir(parents=True, exist_ok=True)
+    return _RUN_DIR
+
+
+def _lan_urls(port):
+    r = _run_cmd("hostname -I 2>/dev/null; ifconfig 2>/dev/null", None, 5)
+    ips = []
+    for tok in r.split():
+        if tok.count(".") == 3 and all(p.isdigit() for p in tok.split(".")):
+            first = tok.split(".")[0]
+            if first not in ("0", "127", "255") and tok not in ips:
+                ips.append(tok)
+    if not ips:
+        return ("akses dari perangkat lain: cek IP lewat "
+                "device(action='wifi_info')")
+    return ("akses dari perangkat lain di wifi yang sama:\n" +
+            "\n".join(f"  http://{ip}:{port}/" for ip in ips))
+
+
+def tool_ssh(action="run", host=None, command=None, path=None, remote=None,
+             port=None):
+    if not host:
+        return ("host wajib diisi, contoh: user@192.168.1.5. Cek IP tujuan "
+                "lewat device(action='wifi_info').")
+    if not (_which("ssh") or _which("scp")):
+        return "error: ssh/scp belum terinstall — pkg install openssh"
+    action = (action or "run").lower()
+    target = host
+    if port:
+        target = f"-p {int(port)} {host}"
+    if action == "run":
+        if not command:
+            return "action=run butuh parameter 'command'"
+        cmd = (f"ssh -o ConnectTimeout=10 {target} "
+               f"{shlex.quote(command)}")
+    elif action == "copy":
+        if not path or not remote:
+            return "action=copy butuh 'path' (lokal) dan 'remote'"
+        cmd = f"scp {shlex.quote(path)} {host}:{shlex.quote(remote)}"
+    elif action == "fetch":
+        if not remote or not path:
+            return "action=fetch butuh 'remote' dan 'path' (tujuan lokal)"
+        cmd = f"scp {host}:{shlex.quote(remote)} {shlex.quote(path)}"
+    else:
+        return f"action tidak dikenal: {action} (run|copy|fetch)"
+    return f"[ssh {host} | {action}] {cmd}\n" + _run_cmd(cmd, None, 120)
+
+
+def tool_download(url, output=None):
+    if not url:
+        return "url wajib diisi"
+    out = output or os.path.basename(urllib.parse.urlparse(url).path) or "download.bin"
+    out = os.path.expanduser(out)
+    if _which("curl"):
+        cmd = (f"curl -L --fail --retry 3 -C - "
+               f"-o {shlex.quote(out)} {shlex.quote(url)}")
+    elif _which("wget"):
+        cmd = f"wget -c -O {shlex.quote(out)} {shlex.quote(url)}"
+    else:
+        return "error: curl/wget belum terinstall — pkg install curl"
+    r = _run_cmd(cmd, None, 600)
+    try:
+        r += f"\nukuran: {os.path.getsize(out)} byte"
+    except OSError:
+        pass
+    return r
+
+
+def tool_serve(action="status", path=None, port=8080):
+    run_dir = _run_dir()
+    pid_file = os.path.join(run_dir, "serve.pid")
+    log_file = os.path.join(run_dir, "serve.log")
+    action = (action or "status").lower()
+    if action == "start":
+        base = os.path.abspath(os.path.expanduser(path or "."))
+        if not os.path.isdir(base):
+            return f"error: folder tidak ada: {base}"
+        if os.path.exists(pid_file):
+            pid = open(pid_file).read().strip()
+            return (f"server sudah jalan (pid {pid}). Stop dulu kalau mau "
+                    "ganti port/folder.")
+        cmd = (f"nohup python3 -m http.server {int(port)} --bind 0.0.0.0 "
+               f"--directory {shlex.quote(base)} > {log_file} 2>&1 & "
+               f"echo $! > {pid_file}")
+        r = _run_cmd(cmd, None, 10)
+        return (f"server jalan di http://0.0.0.0:{port} (folder {base})\n"
+                f"{r}\n{_lan_urls(port)}")
+    if action == "stop":
+        if not os.path.exists(pid_file):
+            return "server tidak jalan."
+        pid = open(pid_file).read().strip()
+        _run_cmd(f"kill {pid} 2>/dev/null; rm -f {pid_file}", None, 10)
+        return f"server dihentikan (pid {pid})."
+    if not os.path.exists(pid_file):
+        return "server tidak jalan. serve(action='start', path='.', port=8080)"
+    pid = open(pid_file).read().strip()
+    return f"pid {pid}: {_run_cmd(f'kill -0 {pid} 2>/dev/null && echo hidup || echo mati', None, 5)}\n{_lan_urls(port)}"
+
+
+def tool_bg(action="list", name=None, command=None, lines=30):
+    run_dir = _run_dir()
+    bg_dir = os.path.join(run_dir, "bg")
+    os.makedirs(bg_dir, exist_ok=True)
+    action = (action or "list").lower()
+    safe = lambda n: re.sub(r"[^A-Za-z0-9_.-]", "_", n or "job")
+    if action == "start":
+        if not name or not command:
+            return "action=start butuh 'name' dan 'command'"
+        pidf = os.path.join(bg_dir, f"{safe(name)}.pid")
+        logf = os.path.join(bg_dir, f"{safe(name)}.log")
+        if os.path.exists(pidf):
+            pid = open(pidf).read().strip()
+            if os.path.exists(f"/proc/{pid}"):
+                return f"job '{name}' sudah jalan (pid {pid})."
+        cmd = (f"nohup bash -c {shlex.quote(command)} > {shlex.quote(logf)} 2>&1 "
+               f"& echo $! > {shlex.quote(pidf)}")
+        r = _run_cmd(cmd, None, 10)
+        try:
+            pid = open(pidf).read().strip()
+        except OSError:
+            pid = "?"
+        return f"[bg] '{name}' jalan dengan pid {pid}\n{r}\nlog: {logf}"
+    if action == "tail":
+        if not name:
+            return "action=tail butuh 'name'"
+        logf = os.path.join(bg_dir, f"{safe(name)}.log")
+        return _run_cmd(f"tail -n {int(lines)} {shlex.quote(logf)} 2>/dev/null "
+                        "|| echo '(belum ada log)'", None, 10)
+    if action == "kill":
+        if not name:
+            return "action=kill butuh 'name'"
+        pidf = os.path.join(bg_dir, f"{safe(name)}.pid")
+        if not os.path.exists(pidf):
+            return f"job '{name}' tidak ada."
+        pid = open(pidf).read().strip()
+        r = _run_cmd(f"kill {pid} 2>/dev/null; rm -f {shlex.quote(pidf)}", None, 10)
+        return f"[bg] '{name}' dihentikan (pid {pid}).\n{r}"
+    rows = []
+    for pidf in sorted(glob.glob(os.path.join(bg_dir, "*.pid"))):
+        nm = os.path.basename(pidf)[:-4]
+        pid = open(pidf).read().strip()
+        status = "HIDUP" if os.path.exists(f"/proc/{pid}") else "mati"
+        rows.append(f"{nm:24} pid={pid:>6} {status}")
+    return "\n".join(rows) if rows else "(tidak ada job background)"
+
+
+def tool_root(action="check", command=None):
+    action = (action or "check").lower()
+    if action == "exec":
+        if not command:
+            return "action=exec butuh 'command'"
+        if os.geteuid() == 0:
+            cmd = command
+        elif _which("su"):
+            cmd = f"su -c {shlex.quote(command)}"
+        else:
+            return ("error: bukan root dan 'su' tidak tersedia (perangkat "
+                    "belum di-root).")
+        return f"[root exec] {cmd}\n" + _run_cmd(cmd, None, 60)
+    r = _run_cmd("id", None, 5)
+    su = f"su: {_which('su') or 'tidak ada'}"
+    return f"{r}\n{su}"
+
+
+def tool_media(action="info", file=None, output=None):
+    action = (action or "info").lower()
+    if action == "play":
+        if not file:
+            return "action=play butuh 'file'"
+        f = os.path.expanduser(file)
+        if not os.path.exists(f):
+            return f"error: file tidak ada: {f}"
+        if _which("termux-media-player"):
+            return _run_dev(["termux-media-player", "play", f], timeout=30)
+        if _which("ffplay"):
+            return _run_cmd(f"ffplay -nodisp -autoexit {shlex.quote(f)}",
+                            None, 30)
+        return "error: butuh termux-api atau ffmpeg buat play"
+    if action == "stop":
+        if _which("termux-media-player"):
+            return _run_dev(["termux-media-player", "stop"], timeout=10)
+        return _run_cmd("pkill -f ffplay 2>/dev/null; echo ok", None, 10)
+    if action == "record":
+        out = os.path.expanduser(output or "~/recording.m4a")
+        if _which("termux-microphone-record"):
+            return _run_cmd(
+                f"termux-microphone-record -f {shlex.quote(out)} -l 5 2>&1; "
+                f"echo 'rekaman selesai: {shlex.quote(out)}'", None, 30)
+        return "error: butuh package termux-api (termux-microphone-record)"
+    if not file:
+        return "action=info butuh 'file' (atau action play/stop/record)"
+    f = os.path.expanduser(file)
+    if _which("ffprobe"):
+        return _run_cmd(f"ffprobe -v error -show_format -show_streams "
+                        f"{shlex.quote(f)}", None, 30)
+    return _run_cmd(f"ls -lh {shlex.quote(f)}", None, 10)
+
+
+def tool_screenshot(path=None, delay=0):
+    argv = ["termux-screenshot"]
+    if path:
+        argv += ["-c", os.path.expanduser(path)]
+    if delay:
+        argv += ["-d", str(int(delay))]
+    r = _run_dev(argv, timeout=30)
+    return r or "(screenshot selesai — cek folder Pictures)"
+
+
+def tool_sys(section="all"):
+    section = (section or "all").lower()
+    labels = {"os": "OS", "cpu": "CPU", "mem": "MEMORI", "disk": "DISK",
+              "net": "JARINGAN"}
+    out = []
+
+    def grab(key, cmd):
+        if section in ("all", key):
+            out.append(f"— {labels[key]} —\n" + _run_cmd(cmd, None, 5))
+
+    grab("os", "uname -a; getprop ro.product.model 2>/dev/null; "
+               "getprop ro.build.version.release 2>/dev/null")
+    grab("cpu", "nproc; grep -m1 'model name' /proc/cpuinfo 2>/dev/null; "
+                "getprop ro.soc.manufacturer 2>/dev/null")
+    grab("mem", "free -h 2>/dev/null || head -3 /proc/meminfo")
+    grab("disk", "df -h / /sdcard 2>/dev/null")
+    grab("net", "hostname -I 2>/dev/null; "
+                "ip -4 route get 1 2>/dev/null | head -1")
+    if not out:
+        return f"section tidak dikenal: {section} (all|os|cpu|mem|disk|net)"
+    return "\n\n".join(out)
+
+
 TOOL_IMPL = {
     "bash": tool_bash,
     "read": tool_read,
@@ -1480,9 +1911,18 @@ TOOL_IMPL = {
     "pkg": tool_pkg,
     "scaffold": tool_scaffold,
     "sdk": tool_sdk,
+    "ssh": tool_ssh,
+    "download": tool_download,
+    "serve": tool_serve,
+    "bg": tool_bg,
+    "root": tool_root,
+    "media": tool_media,
+    "screenshot": tool_screenshot,
+    "sys": tool_sys,
 }
 # tool yang dianggap aman (tidak mengubah sistem) — tetap dikonfirmasi tapi
 # ditandai di prompt
-SAFE_TOOLS = {"read", "glob", "grep", "websearch", "webfetch", "tree", "logs"}
+SAFE_TOOLS = {"read", "glob", "grep", "websearch", "webfetch", "tree", "logs",
+              "sys"}
 
 

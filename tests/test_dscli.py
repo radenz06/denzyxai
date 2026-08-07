@@ -6,6 +6,7 @@ Jalan dengan:  python3 -m pytest -q tests/
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -168,3 +169,64 @@ def test_logs_auto_cari():
 def test_sdk_check_ramah():
     r = dscli.tool_sdk("check")
     assert "ANDROID_HOME" in r
+
+
+# ---------------------------------------------------------------------------
+# Akses & otomasi (v2.2)
+# ---------------------------------------------------------------------------
+
+def test_ssh_wajib_host():
+    assert "host wajib" in dscli.tool_ssh(host=None)
+
+
+def test_ssh_perlu_openssh(monkeypatch):
+    monkeypatch.setattr(dscli, "_which", lambda _: None)
+    r = dscli.tool_ssh(host="user@10.0.0.1")
+    assert "openssh" in r
+
+
+def test_download_wajib_url():
+    assert "url wajib" in dscli.tool_download(None)
+
+
+def test_bg_start_tail_kill():
+    r = dscli.tool_bg("start", name="demo", command="echo halo bg")
+    assert "pid" in r
+    time.sleep(0.3)
+    listing = dscli.tool_bg("list")
+    assert "demo" in listing
+    tail = dscli.tool_bg("tail", name="demo")
+    assert "halo bg" in tail
+    killed = dscli.tool_bg("kill", name="demo")
+    assert "dihentikan" in killed
+    assert "demo" not in dscli.tool_bg("list")
+
+
+def test_bg_start_butuh_command():
+    assert "butuh 'name' dan 'command'" in dscli.tool_bg("start", name="x")
+
+
+def test_serve_start_status_stop():
+    try:
+        r = dscli.tool_serve("start", path=".", port=8765)
+        assert "http://0.0.0.0:8765" in r
+        assert "akses dari perangkat lain" in r
+        assert "hidup" in dscli.tool_serve("status", port=8765)
+    finally:
+        dscli.tool_serve("stop", port=8765)
+    assert "tidak jalan" in dscli.tool_serve("status", port=8765)
+
+
+def test_root_check():
+    r = dscli.tool_root()
+    assert "uid=" in r or "su:" in r
+
+
+def test_sys_sections():
+    assert "OS" in dscli.tool_sys("os")
+    assert "tidak dikenal" in dscli.tool_sys("banana")
+
+
+def test_media_info_butuh_file():
+    assert "action=info butuh 'file'" in dscli.tool_media()
+    assert "action=play butuh 'file'" in dscli.tool_media("play")

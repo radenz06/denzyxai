@@ -31,9 +31,11 @@ tapi serius kalau disuruh kerja.
 - **System prompt dari file** — edit `system_prompt.md`, langsung kepakai
   di sesi berikutnya, nggak perlu restart.
 - **Sesi tersimpan otomatis** — riwayat chat + context di `sessions/`.
-- **Tool calling lengkap (18 tool)** — bash, baca/tulis/edit file, glob,
+- **Tool calling lengkap (26 tool)** — bash, baca/tulis/edit file, glob,
   grep, web search/fetch, task (sub-agent), device (Termux-API), git,
-  build, debug, logs, pkg, scaffold, tree, dan sdk (Android).
+  build, debug, logs, pkg, scaffold, tree, sdk (Android), plus akses
+  ekstra: ssh, download, serve (HTTP server), bg (job background),
+  root (su), media, screenshot, dan sys.
 - **Mode auto 24 jam** (`auto-denz.py`) — baca notifikasi, bales pakai AI
   (gaya persona yang sama), vibrate/TTS, monitor baterai, tahan hidup
   lewat termux-job-scheduler + boot script, dan nggak mati waktu offline
@@ -101,11 +103,19 @@ git                                           # version control
 pkg                                           # dependency (npm/pip/go/cargo)
 scaffold                                      # template proyek baru
 sdk                                           # Android SDK (build APK)
+ssh                                           # eksekusi & transfer ke mesin lain
+download                                      # unduh file (curl/wget, resume)
+serve                                         # server HTTP buat bagi file (LAN)
+bg                                            # job background + list/tail/kill
+root                                          # perintah dengan akses root (su)
+media                                         # play/stop/record/info multimedia
+screenshot                                    # tangkap layar HP
+sys                                           # info sistem (OS/CPU/mem/disk/net)
 ```
 
 Kebijakan keamanan: tool baca-only (`read`, `glob`, `grep`, `websearch`,
-`webfetch`, `tree`, `logs`) ditandai aman. Tool lain diminta konfirmasi
-di TUI kecuali `auto_allow` aktif.
+`webfetch`, `tree`, `logs`, `sys`) ditandai aman. Tool lain diminta
+konfirmasi di TUI kecuali `auto_allow` aktif.
 
 ## Build aplikasi Android
 

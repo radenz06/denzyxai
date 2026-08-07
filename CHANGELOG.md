@@ -4,6 +4,21 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.2.0] - 2026-08-07
+
+### Ditambahkan
+- Tool baru (total 26):
+  - `ssh` — eksekusi perintah + transfer file (scp) ke mesin lain.
+  - `download` — unduh file dengan curl/wget (retry + resume).
+  - `serve` — server HTTP buat berbagi file ke perangkat lain di LAN,
+    jalan di background, bisa start/stop/status.
+  - `bg` — manajemen job background (nohup): start/list/tail/kill.
+  - `root` — eksekusi perintah dengan akses root (su) kalau perangkat
+    di-root.
+  - `media` — play/stop audio-video, rekam suara, info file (ffprobe).
+  - `screenshot` — tangkap layar HP (termux-api).
+  - `sys` — info sistem sekilas (OS, CPU, memori, disk, IP).
+
 ## [2.1.0] - 2026-08-07
 
 ### Ditambahkan

@@ -123,7 +123,7 @@ SESSION_DIR = Path(__file__).resolve().parent / "sessions"
 CRASH_LOG = Path(os.path.expanduser("~/.denzyx_crash.log"))
 
 APP_NAME = "denzyx AI"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 AUTH_PATHS = [
     Path(os.path.expanduser("~/.local/share/opencode/auth.json")),
     Path(os.path.expanduser("~/.config/opencode/auth.json")),
