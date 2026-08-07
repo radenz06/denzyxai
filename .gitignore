@@ -7,7 +7,12 @@ sessions/
 *.png
 local.properties
 .env
+.env.local
 .env.*
+!.env.example
 *.key
 .denzyx/
 .android/
+.pytest_cache/
+.coverage
+backup/

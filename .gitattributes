@@ -1,0 +1,7 @@
+*.py    text eol=lf
+*.md    text eol=lf diff=markdown
+*.sh    text eol=lf
+Makefile text eol=lf
+*.json  text eol=lf
+*.png   binary
+*.jpg   binary
