@@ -36,11 +36,12 @@ tapi serius kalau disuruh kerja.
   build, debug, logs, pkg, scaffold, tree, sdk (Android), plus akses
   ekstra: ssh, download, serve (HTTP server), bg (job background),
   root (su), media, screenshot, dan sys.
-- **Voice chat** (`voice-denz.py`) — panggilan suara ke AI: kamu ngomong,
-  dia denger **jernih** (faster-whisper neural offline; fallback STT
-  Android), lalu jawab disuarakan **cewe natural** (Google TTS → edge-tts
-  → TTS Android). Buka lewat menu "Voice Chat" atau `./denzyx --voice`.
-  Percakapan ikut tersimpan di riwayat sesi.
+- **Voice chat** (`voice-denz.py`) — panggilan suara **adaptif**: AI
+  ikut ritme & mood bicaramu, bisa ganti suara saat disuruh (cowok/
+  cewek/anak kecil), dan dengar walau sedang ngomong (barge-in).
+  STT jernih (faster-whisper) + suara cewe natural (Google TTS →
+  edge-tts → TTS Android). Buka lewat menu "Voice Chat" atau
+  `./denzyx --voice`. Percakapan ikut tersimpan di riwayat sesi.
 - **Mode auto 24 jam** (`auto-denz.py`) — baca notifikasi, bales pakai AI
   (gaya persona yang sama), vibrate/TTS, monitor baterai, tahan hidup
   lewat termux-job-scheduler + boot script, dan nggak mati waktu offline
@@ -83,30 +84,39 @@ butuh package `termux-api`. Untuk auto-daemon butuh `termux-api` juga
 
 ## Voice chat
 
-Panggilan suara: kamu ngomong → **STT jernih** (faster-whisper neural
-offline, model `base`, bahasa Indonesia — fallback `termux-speech-to-text`)
-→ AI jawab ringkas → disuarakan dengan **suara cewe natural** (Google
-Translate TTS bahasa Indonesia → edge-tts `id-ID-GadisNeural` → TTS
-Android). Bilang "stop" buat menutup panggilan.
+Panggilan suara **adaptif**: AI ikut ritme & mood bicaramu, ganti suara
+saat disuruh, dan bisa dengar walau sedang ngomong.
+
+Kamu ngomong → **STT jernih** (faster-whisper neural offline, model
+`base`, bahasa Indonesia — fallback `termux-speech-to-text`) → AI
+membaca ritme (kecepatan), nada, dan mood-mu (ketawa/nangis/marah dari
+analisis audio + kata) → jawab ringkas dengan **suara cewe natural**
+(Google TTS → edge-tts `id-ID-GadisNeural` → TTS Android), kecepatan
+& nada ikut menyesuaikan. Bilang "stop" buat menutup panggilan.
 
 ```sh
-pip install faster-whisper      # sekali — STT jernih offline (sangat disarankan)
+pip install faster-whisper numpy   # sekali — STT jernih + analisis mood/ritme
 ./denzyx --voice                # dari menu: pilih "Voice Chat"
 ./denzyx --voice --lang id-ID   # bahasa STT + TTS (default id-ID)
-./denzyx --voice --rate 1.1     # kencangin ngomong
 ./denzyx --voice --stt whisper  # paksa STT whisper (atau --stt termux)
 ./denzyx --voice --stt-model small    # model whisper lebih akurat (lebih lambat)
 ./denzyx --voice --engine google      # google | edge | android | auto
-./denzyx --voice --voice-name id-ID-GadisNeural   # ganti suara edge-tts
+./denzyx --voice --no-barge-in  # matikan dengar sambil ngomong
+./denzyx --voice --no-learn     # matikan profil belajar ritme/nada
 ./denzyx --voice --wake denz    # cuma respons kalau dipanggil "denz"
 ./denzyx --voice --no-tts       # mode bisu: cuma teks
 ```
 
+Perintah suara (bilang begitu, dan AI-nya ganti): **"pakai suara
+cowok/cewek/anak kecil"**, **"lebih cepat / lebih lambat"**, **"suara
+serak / suara tinggi / melengking"**, **"kembali normal"**. AI belajar
+ritme & nada kamu ke `.denzyx/voice_profile.json` (matikan dengan
+`--no-learn`).
+
 `--engine auto` mencoba Google TTS (tanpa dependency) → edge-tts →
 TTS Android. Google TTS & edge-tts butuh internet; tanpa internet,
-otomatis turun ke TTS Android bahasa Indonesia (di Google TTS biasanya
-juga cewe). Butuh package `termux-api` + izin mikrofon buat Termux
-(muncul otomatis pas pertama kali dengar). Percakapan tersimpan seperti
+otomatis turun ke TTS Android bahasa Indonesia. Butuh package
+`termux-api` + izin mikrofon buat Termux. Percakapan tersimpan seperti
 chat biasa dan muncul di "Riwayat Sesi".
 
 ## Konfigurasi

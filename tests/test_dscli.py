@@ -301,4 +301,76 @@ def test_voice_stt_whisper_ok_boolean():
 def test_voice_speak_chain_default():
     v = _load_voice()
     assert v.DEFAULT_STT_MODEL == "base"
-    assert v.speak.__defaults__[-1] == "id"
+    assert v.speak.__defaults__[-2] == "id"
+
+
+def test_voice_detect_voice_command():
+    v = _load_voice()
+    assert v._detect_voice_command("pakai suara cowok") == {"voice": "male"}
+    assert v._detect_voice_command("ganti suara jadi cewek")["voice"] == "female"
+    assert v._detect_voice_command("suara anak kecil")["voice"] == "child"
+    assert v._detect_voice_command("bicara lebih cepat")["rate"] > 1.0
+    assert v._detect_voice_command("kamu bicara lambat")["rate"] < 1.0
+    assert v._detect_voice_command("suara serak")["pitch"] < 1.0
+    assert v._detect_voice_command("suara melengking")["pitch"] > 1.0
+    assert v._detect_voice_command("balik normal") == {"reset": True}
+    assert v._detect_voice_command("oke lanjut") == {}
+
+
+def test_voice_emotion_from_text():
+    v = _load_voice()
+    assert v._emotion_from_text("wkwkwk lucu banget") == "tertawa"
+    assert v._emotion_from_text("aku sedih banget huhu") == "sedih"
+    assert v._emotion_from_text("hore mantap!") == "ceria"
+    assert v._emotion_from_text("goblok kamu sial") == "marah"
+    assert v._emotion_from_text("apa kabar") == "netral"
+
+
+def test_voice_emotion_from_audio():
+    v = _load_voice()
+    assert v._emotion_from_audio({"rms_db": -18, "f0_mean": 210, "f0_std": 55}) == "ceria"
+    assert v._emotion_from_audio({"rms_db": -45, "f0_mean": 110, "f0_std": 12}) == "sedih"
+    assert v._emotion_from_audio({"rms_db": -22, "f0_mean": 175, "f0_std": 10}) == "tegas"
+    assert v._emotion_from_audio(None) == "netral"
+    assert v._emotion_from_audio({"rms_db": -35, "f0_mean": 140, "f0_std": 30}) == "netral"
+
+
+def test_voice_tts_rate_for_user():
+    v = _load_voice()
+    assert v._tts_rate_for_user(None) == 1.0
+    assert abs(v._tts_rate_for_user(12.0) - 1.0) < 1e-6
+    assert v._tts_rate_for_user(4.0) == 0.7
+    assert v._tts_rate_for_user(18.0) == 1.35
+
+
+def test_voice_speech_rate_est():
+    v = _load_voice()
+    assert v._speech_rate_est("halo apa kabar", {"dur": 2.0}) == 7.0
+    assert v._speech_rate_est("halo apa kabar", None, 5) == 2.8
+    assert v._speech_rate_est("halo", None, None) is None
+
+
+def test_voice_profile_ema(tmp_path, monkeypatch):
+    v = _load_voice()
+    monkeypatch.setattr(v, "PROFILE_PATH", str(tmp_path / "vp.json"))
+    v._profile_update("chars_per_sec", 8.0)
+    v._profile_update("chars_per_sec", 10.0)
+    p = v._load_profile()
+    assert abs(p["chars_per_sec"] - 8.7) < 1e-3
+
+
+def test_voice_speak_returns_tuple(monkeypatch):
+    v = _load_voice()
+    monkeypatch.setattr(v, "_synth_google", lambda t, p, l: (None, "no net"))
+    monkeypatch.setattr(v, "_synth_mp3", lambda t, p, vc, r: (None, "no edge"))
+    msg, interrupted = v.speak("halo", engine="auto", barge_in=False)
+    assert isinstance(interrupted, bool)
+    assert isinstance(msg, str)
+
+
+def test_voice_play_mp3_returns_tuple(monkeypatch):
+    v = _load_voice()
+    monkeypatch.setattr(v, "_which", lambda name: None)
+    err, interrupted = v._play_mp3("/tmp/x.mp3")
+    assert "tidak ada" in err
+    assert interrupted is False

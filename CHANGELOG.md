@@ -4,6 +4,26 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.6.0] - 2026-08-07
+
+### Ditambahkan — voice ADAPTIF
+- **Ikut ritme bicaramu.** Kecepatan ngomong diukur dari rekaman
+  (karakter/detik) → kecepatan bicara AI ikut nyesuain. Belajar makin
+  pas tiap percakapan, profil disimpan di `.denzyx/voice_profile.json`.
+- **Deteksi mood.** Ketawa/nangis/marah/ceria dideteksi dari analisis
+  audio (energi + nada via numpy) dan dari kata (wkwk, huhu, dsb).
+  AI nyetel kecepatan & nada jawaban, plus diminta jawab sesuai mood
+  (menghibur, tegas, dsb). Butuh `pip install numpy`.
+- **Ganti suara pas disuruh.** "pakai suara cowok" → `id-ID-ArdiNeural`
+  (edge-tts), "suara cewek" → GadisNeural/Google, "suara anak kecil" →
+  TTS Android nada tinggi. Juga "lebih cepat/lambat", "suara serak/
+  tinggi/melengking", "kembali normal". Pilihan disimpan di profil.
+- **Dengar sambil ngomong (barge-in).** Mic ikut merekam saat AI lagi
+  ngomong; begitu kamu mulai bicara (energi jauh di atas echo TTS),
+  playback langsung berhenti dan AI siap dengar lagi. Matikan dengan
+  `--no-barge-in`.
+- `--no-learn` buat nonaktifkan profil belajar.
+
 ## [2.5.0] - 2026-08-07
 
 ### Ditambahkan
