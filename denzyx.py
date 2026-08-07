@@ -123,7 +123,19 @@ SESSION_DIR = Path(__file__).resolve().parent / "sessions"
 CRASH_LOG = Path(os.path.expanduser("~/.denzyx_crash.log"))
 
 APP_NAME = "denzyx AI"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
+
+_CLI_HELP = """\
+denzyx AI v{ver} — AI agent buat Termux
+
+Cara pakai:
+  ./denzyx                buka menu utama (TUI)
+  ./denzyx --voice        panggilan suara (dengar & bicara ke AI)
+  ./denzyx --help         bantuan ini
+
+Opsi tambahan yang diteruskan ke mode voice (lihat voice-denz.py):
+  --voice --lang id-ID --rate 1.1 --wake denz --no-tts --listen-once
+""".format(ver=APP_VERSION)
 AUTH_PATHS = [
     Path(os.path.expanduser("~/.local/share/opencode/auth.json")),
     Path(os.path.expanduser("~/.config/opencode/auth.json")),
@@ -3429,6 +3441,7 @@ def about_screen(stdscr):
 def main_menu(stdscr, state):
     items = [
         ("💬  Chat Baru", "mulai percakapan"),
+        ("📞  Voice Chat", "panggilan suara (dengar & bicara)"),
         ("📂  Riwayat Sesi", "buka sesi tersimpan"),
         ("📊  Statistik", "dashboard sesi & konteks"),
         ("⚙️   Pengaturan", "temperature, key, dll"),
@@ -3463,14 +3476,23 @@ def main_menu(stdscr, state):
                 state.saved_id = None
                 chat_screen(stdscr, state)
             elif sel == 1:
-                history_screen(stdscr, state)
+                # keluar dulu dari curses, jalankan voice call, lalu balik
+                curses.endwin()
+                try:
+                    _voice = Path(__file__).with_name("voice-denz.py")
+                    subprocess.call([sys.executable, str(_voice)])
+                except Exception as e:  # noqa: BLE001
+                    input_line(stdscr, f" Voice chat: {e} (Enter) ")
+                stdscr.refresh()
             elif sel == 2:
-                stats_screen(stdscr, state)
+                history_screen(stdscr, state)
             elif sel == 3:
-                settings_screen(stdscr, state)
+                stats_screen(stdscr, state)
             elif sel == 4:
-                about_screen(stdscr)
+                settings_screen(stdscr, state)
             elif sel == 5:
+                about_screen(stdscr)
+            elif sel == 6:
                 ok, err = open_url(BUG_URL)
                 if ok:
                     input_line(stdscr,
@@ -3480,7 +3502,7 @@ def main_menu(stdscr, state):
                     input_line(stdscr,
                                f" Telegram: {BUG_LABEL} — {err}"
                                " (Enter) ")
-            elif sel == 6:
+            elif sel == 7:
                 state.save_session()
                 return False
         elif ch == curses.KEY_RESIZE:
@@ -3588,6 +3610,14 @@ def main(stdscr):
 
 
 if __name__ == "__main__":
+    _cli_args = sys.argv[1:]
+    if any(a in ("-h", "--help") for a in _cli_args):
+        print(_CLI_HELP)
+        sys.exit(0)
+    if "--voice" in _cli_args or "voice" in _cli_args:
+        _rest = [a for a in _cli_args if a not in ("--voice", "voice")]
+        _voice = Path(__file__).with_name("voice-denz.py")
+        sys.exit(subprocess.call([sys.executable, str(_voice)] + _rest))
     # aktifkan bracketed paste (terminal membungkus paste dgn \x1b[200~...\x1b[201~)
     try:
         os.write(1, b"\x1b[?2004h")

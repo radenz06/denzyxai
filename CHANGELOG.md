@@ -4,6 +4,17 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.3.0] - 2026-08-07
+
+### Ditambahkan
+- **Voice chat** (`voice-denz.py` + menu "Voice Chat" + `./denzyx --voice`):
+  call & ngobrol langsung dengan AI. Dengar pakai
+  `termux-speech-to-text` (STT on-device Android, tanpa server), AI
+  jawab disuarakan lewat `termux-tts-speak`. Opsi `--lang`, `--rate`,
+  `--pitch`, `--wake <kata>`, `--no-tts`, `--listen-once`. Percakapan
+  tersimpan ke `sessions/` dan muncul di riwayat TUI.
+- CLI `./denzyx --help`.
+
 ## [2.2.0] - 2026-08-07
 
 ### Ditambahkan

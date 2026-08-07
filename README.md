@@ -36,6 +36,10 @@ tapi serius kalau disuruh kerja.
   build, debug, logs, pkg, scaffold, tree, sdk (Android), plus akses
   ekstra: ssh, download, serve (HTTP server), bg (job background),
   root (su), media, screenshot, dan sys.
+- **Voice chat** (`voice-denz.py`) — panggilan suara ke AI: kamu ngomong,
+  dia denger (STT on-device Android via `termux-speech-to-text`), lalu
+  jawab disuarakan (`termux-tts-speak`). Buka lewat menu "Voice Chat" atau
+  `./denzyx --voice`. Percakapan ikut tersimpan di riwayat sesi.
 - **Mode auto 24 jam** (`auto-denz.py`) — baca notifikasi, bales pakai AI
   (gaya persona yang sama), vibrate/TTS, monitor baterai, tahan hidup
   lewat termux-job-scheduler + boot script, dan nggak mati waktu offline
@@ -68,12 +72,31 @@ butuh package `termux-api`. Untuk auto-daemon butuh `termux-api` juga
 |---|---|
 | Buka app | `./denzyx` (atau `denzyx` kalau sudah di-`install.sh`) |
 | Shortcut instan | Ctrl+Alt+D (lewat `.bashrc` + `.blerc`) |
+| Voice chat | menu "Voice Chat" atau `./denzyx --voice` |
 | Pindah menu | ↑/↓, j/k |
 | Pilih / kirim | Enter |
 | Kembali / batal | ESC |
 | Keluar | Ctrl-C |
 | Auto-reply 24 jam | `python3 auto-denz.py install` lalu `status` |
 | Cek status SDK Android | tool `sdk` di dalam chat |
+
+## Voice chat
+
+Panggilan suara: kamu ngomong → `termux-speech-to-text` (STT on-device
+Android, tanpa server) → AI jawab → disuarakan `termux-tts-speak`.
+Bilang "stop" buat menutup panggilan.
+
+```sh
+./denzyx --voice                    # dari menu: pilih "Voice Chat"
+./denzyx --voice --lang id-ID       # atur bahasa STT
+./denzyx --voice --rate 1.1         # kencangin TTS
+./denzyx --voice --wake denz        # cuma respons kalau dipanggil "denz"
+./denzyx --voice --no-tts           # mode bisu: cuma teks
+```
+
+Butuh package `termux-api` + izin mikrofon buat Termux (muncul otomatis
+pas pertama kali dengar). Percakapan tersimpan seperti chat biasa dan
+muncul di "Riwayat Sesi".
 
 ## Konfigurasi
 
@@ -137,6 +160,7 @@ denzyz/
 ├── denzyx.py          # app utama (TUI curses + loop tool calling)
 ├── dscli.py           # library tool-calling (schema + implementasi)
 ├── auto-denz.py       # daemon 24 jam (notifikasi, auto-reply, baterai)
+├── voice-denz.py      # panggilan suara (STT + TTS via termux-api)
 ├── system_prompt.md   # persona & aturan AI
 ├── theme.md           # warna TUI
 ├── denzyx             # launcher (resolver folder + python path)

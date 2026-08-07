@@ -230,3 +230,40 @@ def test_sys_sections():
 def test_media_info_butuh_file():
     assert "action=info butuh 'file'" in dscli.tool_media()
     assert "action=play butuh 'file'" in dscli.tool_media("play")
+
+
+# ---------------------------------------------------------------------------
+# Voice chat (v2.3) — helper murni, tanpa mic
+# ---------------------------------------------------------------------------
+
+def _load_voice():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "voice-denz.py")
+    spec = importlib.util.spec_from_file_location("voice_denz_mod", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_voice_plain_markdown():
+    v = _load_voice()
+    assert v._plain("# Judul\n**tegas** `kode`") == "Judul\ntegas kode"
+    assert "kode" not in v._plain("```\nkode blok\n```")
+
+
+def test_voice_is_exit():
+    v = _load_voice()
+    assert v._is_exit("stop")
+    assert v._is_exit("Matikan panggilan.")
+    assert v._is_exit("sampai jumpa")
+    assert not v._is_exit("beresin tugas sampai selesai")
+    assert not v._is_exit("gimana cara stop kontak dicolok")
+
+
+def test_voice_cli_help():
+    import subprocess
+    root = os.path.dirname(os.path.dirname(__file__))
+    r = subprocess.run(
+        ["python3", os.path.join(root, "denzyx.py"), "--help"],
+        capture_output=True, text=True, timeout=30)
+    assert "voice" in r.stdout.lower()
