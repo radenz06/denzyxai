@@ -51,6 +51,7 @@ SUB_DAYS_DEFAULT = 30
 _DEFAULTS = {
     "tg_bot_token": "",
     "tg_chat_id": "",
+    "tg_owner_username": "",
     "owner": {"username": "denzyx", "password_hash": "", "salt": ""},
     "secret": "",
     "price_idr": PRICE_DEFAULT,
@@ -377,6 +378,10 @@ pre{white-space:pre-wrap;background:#0d0f14;padding:10px;border-radius:8px}
 .toolbar a{margin-right:12px;text-decoration:none}
 small{color:#8a8f98}table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:6px;border-bottom:1px solid #262b36}
+.paycard{background:#123;border:1px solid #2b6bff;border-radius:12px;
+padding:16px;margin:14px 0;text-align:center}
+a.paybtn{display:inline-block;background:#2b6bff;color:#fff;padding:12px 18px;
+border-radius:10px;text-decoration:none;font-weight:700;font-size:16px}
 """
 
 _PAGE = """<!doctype html><html lang="id"><head><meta charset="utf-8">
@@ -410,17 +415,25 @@ def _login_page(cfg, msg="", err=""):
     return page("Login", body)
 
 
-def _register_page(cfg, msg="", err=""):
+def _register_page(cfg, msg="", err="", m=None):
+    pay = ""
+    if m and member_status(m) == "pending":
+        pay = f"""<div class="paycard"><b>Langkah aktivasi:</b><br>
+1. Klik tombol di bawah untuk chat owner di Telegram<br>
+2. Kirim bukti & dapatkan QR pembayaran<br>
+3. Setelah dibayar, akun kamu diaktifkan otomatis
+{_pay_tg_link(cfg, m)}
+<p><small>Status kamu: <b>menunggu konfirmasi</b></small></p></div>"""
     body = f"""<div class="card"><h3>Registrasi Member</h3>
-<p><small>Langganan 1 bulan · <b>Rp {cfg.get('price_idr'):,}</b></small></p>
-{_qr_html(cfg)}
-{_flash(msg, err)}
-<form method="post" action="/register">
-<input name="username" placeholder="username (login)" required>
-<input name="display_name" placeholder="nama panggilan">
-<input name="password" type="password" placeholder="password" required>
-<button type="submit">Daftar & Langganan</button></form>
-<p><small>Sudah daftar? <a href="/login">Login</a></small></p></div>"""
+ <p><small>Langganan 1 bulan · <b>Rp {cfg.get('price_idr'):,}</b></small></p>
+ {pay}
+ {_flash(msg, err)}
+ <form method="post" action="/register">
+ <input name="username" placeholder="username (login)" required>
+ <input name="display_name" placeholder="nama panggilan">
+ <input name="password" type="password" placeholder="password" required>
+ <button type="submit">Daftar & Langganan</button></form>
+ <p><small>Sudah daftar? <a href="/login">Login</a></small></p></div>"""
     return page("Registrasi", body)
 
 
@@ -431,6 +444,19 @@ def _flash(msg, err):
     if err:
         out += f'<p style="color:#ff6b6b">{err}</p>'
     return out
+
+
+def _pay_tg_link(cfg, m):
+    """Link Telegram DM ke owner dengan pesan permintaan QR (blank payment)."""
+    owner = (cfg.get("tg_owner_username") or "").strip().lstrip("@")
+    if not owner:
+        return ""
+    text = ("halo bang denz, ane mau berlanggan denzyx ai, "
+            "bisa kirimkan qr sekarang?")
+    if m and m.get("username"):
+        text += f"\nusername: {m['username']}"
+    url = "https://t.me/" + urllib.parse.quote(owner)
+    return f'<a class="paybtn" target="_blank" rel="noopener" href="{url}?text={urllib.parse.quote(text)}">💬 Minta QR ke Owner</a>'
 
 
 def _chat_page(m, cfg):
@@ -472,7 +498,15 @@ msgs.scrollTop=msgs.scrollHeight;}};
 def _status_page(m):
     st = member_status(m)
     badge = f'<span class="badge {st}">{st}</span>'
+    pay = ""
+    if st == "pending":
+        cfg = load_config()
+        pay = f"""<div class="paycard"><b>Akun belum aktif</b><br>
+Chat owner di Telegram untuk minta QR pembayaran:
+{_pay_tg_link(cfg, m)}
+<p><small>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari — setelah dibayar akun otomatis aktif</small></p></div>"""
     return page("Status", f"""<div class="card"><h3>Status Langganan</h3>
+{pay}
 <p>Username: <b>{m['username']}</b> {badge}</p>
 <p>Nama: {m.get('display_name', '-')}</p>
 <p>Aktif s/d: <b>{m.get('expires_at') or '-'}</b></p>
@@ -704,8 +738,9 @@ class Handler(BaseHTTPRequestHandler):
         create_member(username, password, display, self.client_address[0])
         from denzbot import tg_notify
         tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self.client_address[0]}. Cek owner panel untuk aktivasi.")
+        m = load_member(username)
         self._send(200, _register_page(
-            cfg, msg=f"Berhasil daftar, {username}. Status: menunggu konfirmasi pembayaran.").encode())
+            cfg, msg=f"Berhasil daftar, {username}.", m=m).encode())
 
     def _post_chat(self, data):
         m, _ = self._auth_member()

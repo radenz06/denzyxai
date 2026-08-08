@@ -168,6 +168,26 @@ class TestPages:
         html = webdenz._owner_page(webdenz.load_config())
         assert "Owner Panel" in html
 
+    def test_pending_page_has_pay_button(self, wd):
+        import webdenz
+        cfg = webdenz.load_config()
+        cfg["tg_owner_username"] = "colipopi"
+        webdenz.save_config(cfg)
+        webdenz.create_member("budi", "pw123", "Budi")
+        html = webdenz._status_page(webdenz.load_member("budi"))
+        assert "Minta QR ke Owner" in html
+        assert "https://t.me/colipopi?text=" in html
+        assert "bisa kirimkan qr sekarang" in urllib.parse.unquote(
+            webdenz._pay_tg_link(cfg, webdenz.load_member("budi")))
+        # aktif → tombol hilang
+        m = webdenz.load_member("budi")
+        m["status"] = "active"
+        from datetime import datetime, timedelta
+        m["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
+        webdenz.save_member(m)
+        html2 = webdenz._status_page(webdenz.load_member("budi"))
+        assert "Minta QR ke Owner" not in html2
+
 
 class TestHTTP:
     def _start(self, wd):

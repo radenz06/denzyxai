@@ -197,12 +197,28 @@ def _restart(which):
         os.kill(old, 9)
         time.sleep(0.5)
     import subprocess
+    log = PID_DIR / f"{which}.log"
+    logf = open(log, "a", encoding="utf-8")
     proc = subprocess.Popen(
         [sys.executable, str(script)],
         cwd=str(script.parent),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=logf, stderr=subprocess.STDOUT)
     pidfile.write_text(str(proc.pid))
-    print(f"  🔄 {which} restart → pid {proc.pid}")
+    print(f"  🔄 {which} start → pid {proc.pid} (log: {log})")
+
+
+def _stop(which):
+    sp, bp = _pids()
+    pid = sp if which == "server" else bp
+    if not pid:
+        print(f"  {which} tidak jalan")
+        return
+    try:
+        os.kill(pid, 9)
+        print(f"  ⏹ {which} (pid {pid}) dihentikan")
+    except OSError as e:
+        print(f"  ⏹ {which}: {e}")
+    (PID_DIR / f"{which}.pid").unlink(missing_ok=True)
 
 
 def _menu():
@@ -257,6 +273,14 @@ def main():
             _list_members()
         elif arg == "status":
             _status()
+        elif arg == "start-bot":
+            _restart("bot")
+        elif arg == "stop-bot":
+            _stop("bot")
+        elif arg == "start-server":
+            _restart("server")
+        elif arg == "stop-server":
+            _stop("server")
         else:
             print(__doc__)
         return

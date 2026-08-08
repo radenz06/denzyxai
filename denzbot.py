@@ -173,7 +173,9 @@ def handle_message(text):
                 "/activate <user> /ban <user> /unban <user> "
                 "/extend <user> <hari>")
     try:
-        return fn(cfg, arg)
+        if arg:
+            return fn(cfg, arg)
+        return fn(cfg)
     except Exception as e:  # noqa: BLE001
         return f"error: {e}"
 

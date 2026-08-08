@@ -1,6 +1,7 @@
 {
   "tg_bot_token": "",
   "tg_chat_id": "",
+  "tg_owner_username": "colipopi",
   "owner": {
     "username": "denzyx",
     "password_hash": "",
