@@ -221,6 +221,30 @@ def _stop(which):
     (PID_DIR / f"{which}.pid").unlink(missing_ok=True)
 
 
+def _ensure():
+    """Pastikan server + bot jalan (start kalau mati). Return bool semua ok."""
+    sp, bp = _pids()
+    result = True
+    if not (sp and _alive(sp)):
+        _restart("server")
+        result = False
+    else:
+        print(f"  ✓ server jalan (pid {sp})")
+    if not (bp and _alive(bp)):
+        _restart("bot")
+        result = False
+    else:
+        print(f"  ✓ bot jalan (pid {bp})")
+    return result
+
+
+def _restart_all():
+    _stop("server")
+    _stop("bot")
+    _restart("server")
+    _restart("bot")
+
+
 def _menu():
     _status()
     print("""
@@ -281,6 +305,10 @@ def main():
             _restart("server")
         elif arg == "stop-server":
             _stop("server")
+        elif arg == "ensure":
+            _ensure()
+        elif arg == "restart":
+            _restart_all()
         else:
             print(__doc__)
         return

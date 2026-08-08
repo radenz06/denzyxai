@@ -20,4 +20,7 @@ backup/
 # webdenz — data & konfigurasi lokal member
 webconfig.json
 webdata/
+
+# frontend vercel — url backend tidak ikut di-commit
+web-frontend/api.js
 .github/workflows/ci.yml

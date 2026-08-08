@@ -586,12 +586,21 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     # --- helpers ---
+    def _cors(self, headers):
+        out = dict(headers or {})
+        out.setdefault("Access-Control-Allow-Origin", "*")
+        out.setdefault("Access-Control-Allow-Methods",
+                       "GET, POST, OPTIONS")
+        out.setdefault("Access-Control-Allow-Headers", "Content-Type")
+        return out
+
     def _send(self, code, body=b"", ctype="text/html; charset=utf-8",
               headers=None):
+        headers = self._cors(headers)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        for k, v in (headers or {}).items():
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         if body:
@@ -600,6 +609,9 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj, headers=None):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(),
                    "application/json; charset=utf-8", headers)
+
+    def _wants_json(self):
+        return "json" in self.headers.get("Accept", "")
 
     def _cookies(self):
         c = SimpleCookie()
@@ -627,6 +639,10 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_member(self):
         tok = self._cookies().get("denz_member")
         if not tok:
+            auth = self.headers.get("Authorization", "")
+            if auth.lower().startswith("bearer "):
+                tok = auth[7:].strip()
+        if not tok:
             return None, None
         return member_by_token(tok)
 
@@ -634,12 +650,19 @@ class Handler(BaseHTTPRequestHandler):
         return owner_token_valid(self._cookies().get("denz_owner"))
 
     # --- routes ---
+    def do_OPTIONS(self):
+        self._send(204, b"")
+
     def do_GET(self):
         cfg = load_config()
         path = urllib.parse.urlparse(self.path).path
         m, _ = self._auth_member()
         if path == "/":
             self._redirect("/chat" if m else "/login")
+        elif path == "/api/status":
+            self._api_status(m)
+        elif path == "/api/me":
+            self._api_me(m)
         elif path == "/login":
             self._send(200, _login_page(cfg).encode())
         elif path == "/register":
@@ -670,7 +693,11 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         path = urllib.parse.urlparse(self.path).path
         data = self._form()
-        if path == "/login":
+        if path == "/api/register":
+            self._api_register(data)
+        elif path == "/api/login":
+            self._api_login(data)
+        elif path == "/login":
             self._post_login(cfg, data)
         elif path == "/register":
             self._post_register(cfg, data)
@@ -685,6 +712,79 @@ class Handler(BaseHTTPRequestHandler):
                 self._owner_post(path, data)
         else:
             self._send(404, page("404", "<p>404</p>").encode())
+
+    # --- api json (untuk frontend vercel) ---
+    def _api_register(self, data):
+        cfg = load_config()
+        username = str(data.get("username") or "").strip()
+        display = str(data.get("display_name") or "").strip()
+        password = str(data.get("password") or "")
+        if len(username) < 3 or len(password) < 4:
+            self._json(400, {"ok": False, "error": "username min 3, password min 4"})
+            return
+        if load_member(username):
+            self._json(400, {"ok": False, "error": "username sudah dipakai"})
+            return
+        create_member(username, password, display, self.client_address[0])
+        from denzbot import tg_notify
+        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self.client_address[0]}. Cek owner panel untuk aktivasi.")
+        m = load_member(username)
+        self._json(200, {"ok": True, "username": username,
+                         "status": member_status(m),
+                         "msg": f"Berhasil daftar, {username}.",
+                         "pay_link": _pay_tg_link(cfg, m)})
+
+    def _api_login(self, data):
+        cfg = load_config()
+        username = str(data.get("username") or "").strip()
+        password = str(data.get("password") or "")
+        m = load_member(username)
+        ok = False
+        if m and m.get("password"):
+            try:
+                ok = secrets.compare_digest(dec_secret(m["password"]), password)
+            except Exception:  # noqa: BLE001
+                ok = False
+        log_login(username, ok, self.client_address[0])
+        if not ok:
+            self._json(401, {"ok": False, "error": "username/password salah"})
+            return
+        st = member_status(m)
+        if st == "banned":
+            self._json(403, {"ok": False, "status": st, "error": "akun diblokir"})
+            return
+        if st == "pending":
+            self._json(403, {"ok": False, "status": st, "error": "menunggu konfirmasi pembayaran",
+                             "pay_link": _pay_tg_link(cfg, m)})
+            return
+        if st == "expired":
+            self._json(403, {"ok": False, "status": st, "error": "langganan kedaluwarsa — hubungi owner",
+                             "pay_link": _pay_tg_link(cfg, m)})
+            return
+        tok = issue_member_session(username, self.client_address[0])
+        from denzbot import tg_notify
+        tg_notify(f"🔓 Login member: {username} ({self.client_address[0]})")
+        self._json(200, {"ok": True, "token": tok, "username": username,
+                         "status": st, "expires_at": m.get("expires_at"),
+                         "chat_url": "/chat"})
+
+    def _api_status(self, m):
+        if not m:
+            self._json(401, {"ok": False, "error": "login dulu"})
+            return
+        self._json(200, {"ok": True, "username": m["username"],
+                         "status": member_status(m),
+                         "expires_at": m.get("expires_at")})
+
+    def _api_me(self, m):
+        if not m:
+            self._json(401, {"ok": False, "error": "login dulu"})
+            return
+        self._json(200, {"ok": True, "username": m["username"],
+                         "display_name": m.get("display_name"),
+                         "status": member_status(m),
+                         "expires_at": m.get("expires_at"),
+                         "pay_link": _pay_tg_link(load_config(), m)})
 
     # --- handlers ---
     def _serve_qr(self, cfg):

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>denzyx AI — Member</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--blue:#2b6bff;--ok:#188038;
+--err:#ff6b6b;--txt:#e6e6e6;--dim:#8a8f98}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--txt);
+margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+padding:16px}
+.wrap{width:100%;max-width:420px}
+.brand{text-align:center;margin-bottom:18px}
+.brand b{font-size:26px}
+.brand small{color:var(--dim)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+padding:22px}
+.card h3{margin:0 0 14px}
+label{font-size:13px;color:var(--dim);display:block;margin:10px 0 4px}
+input{width:100%;background:var(--bg);color:var(--txt);border:1px solid #333;
+border-radius:9px;padding:11px;font-size:15px}
+button{width:100%;background:var(--blue);color:#fff;border:none;border-radius:9px;
+padding:12px;font-size:16px;font-weight:700;margin-top:16px;cursor:pointer}
+button:disabled{opacity:.6}
+.msg{margin:12px 0;padding:10px 12px;border-radius:9px;font-size:14px}
+.msg.err{background:#3a1414;border:1px solid var(--err);color:var(--err)}
+.msg.ok{background:#12331b;border:1px solid var(--ok);color:#7fd9a0}
+.msg.info{background:#0d1b36;border:1px solid var(--blue);color:#9dc0ff}
+a{color:#6ea8fe}
+.switch{text-align:center;margin-top:14px;font-size:14px;color:var(--dim)}
+a.paybtn{display:block;background:var(--blue);color:#fff;text-align:center;
+padding:12px;border-radius:9px;text-decoration:none;font-weight:700;margin-top:8px}
+.hidden{display:none}
+.status-line{font-size:15px;margin:6px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px}
+.badge.pending{background:#8a6d00}.badge.active{background:var(--ok)}
+.badge.banned{background:#b3261e}.badge.expired{background:#555}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><b>denzyx AI</b><br><small>langganan member</small></div>
+
+  <div id="login" class="card">
+    <h3>Login Member</h3>
+    <div id="login-msg"></div>
+    <label>Username</label>
+    <input id="login-user" autocomplete="username">
+    <label>Password</label>
+    <input id="login-pass" type="password" autocomplete="current-password">
+    <button id="login-btn" onclick="doLogin()">Masuk</button>
+    <div class="switch">Belum daftar? <a href="#" onclick="showReg();return false">Daftar di sini</a></div>
+  </div>
+
+  <div id="register" class="card hidden">
+    <h3>Daftar & Langganan</h3>
+    <div id="reg-msg"></div>
+    <label>Nama panggilan</label>
+    <input id="reg-name" autocomplete="nickname">
+    <label>Username (login)</label>
+    <input id="reg-user" autocomplete="username">
+    <label>Password</label>
+    <input id="reg-pass" type="password" autocomplete="new-password">
+    <button id="reg-btn" onclick="doRegister()">Daftar & Langganan</button>
+    <div class="switch">Sudah daftar? <a href="#" onclick="showLogin();return false">Login di sini</a></div>
+  </div>
+
+  <div id="panel" class="card hidden">
+    <h3>Status Langganan</h3>
+    <div id="panel-msg"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

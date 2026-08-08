@@ -131,6 +131,7 @@ denzyx AI v{ver} — AI agent buat Termux
 Cara pakai:
   ./denzyx                buka menu utama (TUI)
   ./denzyx --voice        panggilan suara (dengar & bicara ke AI)
+  ./denzyx --noweb        tanpa auto-start web server + bot telegram
   ./denzyx --help         bantuan ini
 
 Opsi tambahan yang diteruskan ke mode voice (lihat voice-denz.py):
@@ -3629,6 +3630,13 @@ if __name__ == "__main__":
         _rest = [a for a in _cli_args if a not in ("--voice", "voice")]
         _voice = Path(__file__).with_name("voice-denz.py")
         sys.exit(subprocess.call([sys.executable, str(_voice)] + _rest))
+    # auto-start web server + bot telegram (kecuali --noweb)
+    if "--noweb" not in _cli_args:
+        try:
+            _admin = Path(__file__).with_name("admin-denz.py")
+            subprocess.call([sys.executable, str(_admin), "ensure"])
+        except Exception:  # noqa: BLE001
+            pass
     # aktifkan bracketed paste (terminal membungkus paste dgn \x1b[200~...\x1b[201~)
     try:
         os.write(1, b"\x1b[?2004h")
