@@ -20,3 +20,4 @@ backup/
 # webdenz — data & konfigurasi lokal member
 webconfig.json
 webdata/
+.github/workflows/ci.yml
