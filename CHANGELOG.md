@@ -4,6 +4,17 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [2.7.0] - 2026-08-07
+
+### Ditambahkan
+- **Tool `locate` — cek lokasi lengkap.** Begitu user minta cek lokasi:
+  (1) GPS dinyalakan via Termux-API (`termux-location -p gps`, fallback
+  network/passive), (2) geolocation IP publik (ipwho.is → ip-api),
+  (3) hasilnya disajikan sebagai daftar/list (`- latitude`, `- longitude`,
+  akurasi, kota, negara, ISP, link maps). `locate(action='all'|'gps'|'ip')`.
+- System prompt diarahkan supaya selalu pakai `locate` untuk cek lokasi
+  dan menampilkan hasilnya sebagai list.
+
 ## [2.6.0] - 2026-08-07
 
 ### Ditambahkan — voice ADAPTIF

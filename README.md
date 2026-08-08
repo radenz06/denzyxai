@@ -31,7 +31,7 @@ tapi serius kalau disuruh kerja.
 - **System prompt dari file** — edit `system_prompt.md`, langsung kepakai
   di sesi berikutnya, nggak perlu restart.
 - **Sesi tersimpan otomatis** — riwayat chat + context di `sessions/`.
-- **Tool calling lengkap (26 tool)** — bash, baca/tulis/edit file, glob,
+- **Tool calling lengkap (27 tool)** — bash, baca/tulis/edit file, glob,
   grep, web search/fetch, task (sub-agent), device (Termux-API), git,
   build, debug, logs, pkg, scaffold, tree, sdk (Android), plus akses
   ekstra: ssh, download, serve (HTTP server), bg (job background),
@@ -140,6 +140,7 @@ bash  read  write  edit  glob  grep          # kerja file & shell
 websearch  webfetch                          # riset
 task                                          # sub-agent otonom
 device                                        # battery, notif, SMS, dll (Termux-API)
+locate                                        # cek lokasi: GPS (Termux-API) + geolocation IP
 tree                                          # struktur proyek
 build  test  run                              # build otomatis per tipe proyek
 debug  logs                                   # debugging & analisa log
@@ -158,7 +159,7 @@ sys                                           # info sistem (OS/CPU/mem/disk/net
 ```
 
 Kebijakan keamanan: tool baca-only (`read`, `glob`, `grep`, `websearch`,
-`webfetch`, `tree`, `logs`, `sys`) ditandai aman. Tool lain diminta
+`webfetch`, `tree`, `logs`, `sys`, `locate`) ditandai aman. Tool lain diminta
 konfirmasi di TUI kecuali `auto_allow` aktif.
 
 ## Build aplikasi Android

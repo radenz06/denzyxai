@@ -232,6 +232,69 @@ def test_media_info_butuh_file():
     assert "action=play butuh 'file'" in dscli.tool_media("play")
 
 
+def test_locate_terdaftar_dan_aman():
+    names = {t["function"]["name"] for t in dscli.TOOLS}
+    assert "locate" in names
+    assert "locate" in dscli.TOOL_IMPL
+    assert "locate" in dscli.SAFE_TOOLS
+
+
+def test_locate_action_tidak_dikenal():
+    r = dscli.tool_locate("banana")
+    assert "tidak dikenal" in r and "all | gps | ip" in r
+
+
+def test_locate_gps_saja(monkeypatch):
+    fake = {"latitude": -6.2000, "longitude": 106.8166, "accuracy": 12.0,
+            "altitude": 50.0, "provider": "gps"}
+    monkeypatch.setattr(dscli, "_loc_gps_fix", lambda: (fake, None))
+    r = dscli.tool_locate("gps")
+    lines = [l for l in r.splitlines() if l.strip().startswith("-")]
+    assert any("- latitude: -6.200000" in l for l in lines)
+    assert any("- longitude: 106.816600" in l for l in lines)
+    assert any("- akurasi: ±12 m" in l for l in lines)
+    assert any("maps" in l for l in lines)
+    assert "Lokasi IP" not in r
+
+
+def test_locate_ip_saja(monkeypatch):
+    fake = {"ip": "1.2.3.4", "country": "Indonesia", "region": "Jawa Barat",
+            "city": "Bandung", "latitude": -6.9175, "longitude": 107.6191,
+            "isp": "Telkom", "timezone": "Asia/Jakarta"}
+    monkeypatch.setattr(dscli, "_loc_ip_geo", lambda: (fake, None))
+    r = dscli.tool_locate("ip")
+    assert "Lokasi IP (1.2.3.4)" in r
+    assert "- negara: Indonesia / Jawa Barat" in r
+    assert "- kota: Bandung" in r
+    assert "- ISP: Telkom" in r
+    assert "Lokasi GPS" not in r
+
+
+def test_locate_all_list(monkeypatch):
+    gps = {"latitude": -7.2964, "longitude": 108.2093, "accuracy": 200.0,
+           "provider": "network"}
+    ip = {"ip": "9.9.9.9", "country": "Indonesia", "city": "Tasikmalaya",
+          "isp": "ISP-X", "timezone": "Asia/Jakarta"}
+    monkeypatch.setattr(dscli, "_loc_gps_fix", lambda: (gps, None))
+    monkeypatch.setattr(dscli, "_loc_ip_geo", lambda: (ip, None))
+    r = dscli.tool_locate("all")
+    assert r.count(":") >= 2
+    assert "- latitude: -7.296400" in r
+    assert "Lokasi IP (9.9.9.9)" in r
+    assert "- kota: Tasikmalaya" in r
+    for line in r.splitlines():
+        assert line.startswith(("- ", "Lokasi "))
+
+
+def test_locate_ip_gagal_tetap_list(monkeypatch):
+    monkeypatch.setattr(dscli, "_loc_gps_fix", lambda: (None, "boo"))
+    monkeypatch.setattr(dscli, "_loc_ip_geo", lambda: (None, "no net"))
+    r = dscli.tool_locate("all")
+    assert "- tidak tersedia" in r
+    assert "Lokasi IP" in r
+    assert "Lokasi GPS" in r
+
+
 # ---------------------------------------------------------------------------
 # Voice chat (v2.3) — helper murni, tanpa mic
 # ---------------------------------------------------------------------------

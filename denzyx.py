@@ -123,7 +123,7 @@ SESSION_DIR = Path(__file__).resolve().parent / "sessions"
 CRASH_LOG = Path(os.path.expanduser("~/.denzyx_crash.log"))
 
 APP_NAME = "denzyx AI"
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 
 _CLI_HELP = """\
 denzyx AI v{ver} — AI agent buat Termux

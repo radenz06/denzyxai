@@ -11,11 +11,13 @@ App utama (denzyx.py) import ketiga simbol ini via `import dscli`.
 """
 
 import glob
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -236,6 +238,26 @@ TOOLS = [
                              "description": "parameter fitur (opsional)"},
                 },
                 "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "locate",
+            "description": "Cek lokasi lengkap lalu tampilkan sebagai daftar "
+                           "(list): (1) nyalain GPS via Termux-API "
+                           "(termux-location -p gps; fallback network/passive) "
+                           "dan (2) geolocation dari IP publik (ipwho.is / "
+                           "ip-api). action='all' (default), 'gps', atau 'ip'. "
+                           "Contoh: locate(action='all').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "description": "all (default) | gps | ip"},
+                },
+                "required": [],
             },
         },
     },
@@ -1027,6 +1049,176 @@ def tool_device(action=None, args=None):
         else:
             argv.append(sval)
     return _run_dev(argv, stdin=stdin)
+
+
+# ---------------------------------------------------------------------------
+# Locate (cek lokasi lengkap): GPS via Termux-API + geolocation IP
+# ---------------------------------------------------------------------------
+
+_LOCATE_PROVIDERS = ("gps", "network", "passive")
+_IP_API = ("https://ipwho.is/", "http://ip-api.com/json/")
+
+
+def _loc_kill_stale():
+    """Bersihin proses termux-api Location yang nyangkut (sisa request yang
+    timeout). Biar request berikutnya nggak antri/nggak dianggap 'sibuk'.
+    Pakai bracket [i] biar pkill nggak match prosesnya sendiri."""
+    try:
+        subprocess.run(["pkill", "-f", "termux-api Locat[i]on"],
+                       capture_output=True, text=True, timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _loc_gps_fix():
+    """Aktifkan GPS via termux-api (termux-location -p gps) lalu ambil fix.
+    Provider (gps/network/passive) dijalankan PARALEL — hasil pertama yang
+    dapat fix dipakai. Ini bikin respons tetap cepat walau GPS lagi hang.
+    Return (json, err)."""
+    if not _which("termux-location"):
+        return None, "termux-location tidak ada — pkg install termux-api"
+    _loc_kill_stale()
+    procs = []
+    for prov in _LOCATE_PROVIDERS:
+        try:
+            p = subprocess.Popen(
+                ["termux-location", "-p", prov, "-r", "once"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            procs.append((prov, p))
+        except Exception:  # noqa: BLE001
+            continue
+    if not procs:
+        return None, "gagal jalankan termux-location"
+    deadline = time.monotonic() + 12
+    done = None
+    while time.monotonic() < deadline:
+        for prov, p in procs:
+            if p.poll() is not None:
+                try:
+                    out, _err = p.communicate(timeout=2)
+                except Exception:  # noqa: BLE001
+                    out = ""
+                out = (out or "").strip()
+                if out:
+                    try:
+                        j = json.loads(out)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if j.get("latitude") is not None:
+                        done = (prov, j)
+                        break
+        if done:
+            break
+        time.sleep(0.2)
+    for _prov, p in procs:
+        if p.poll() is None:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+    _loc_kill_stale()
+    if done:
+        return done[1], None
+    return None, "gagal dapat fix lokasi (cek izin lokasi & GPS aktif)"
+
+
+def _loc_ip_geo():
+    """Geolocation dari IP publik (ipwho.is dulu, ip-api cadangan).
+    Return dict ternormalisasi {ip, country, region, city, latitude,
+    longitude, isp, org, timezone} atau (None, err)."""
+    if not _which("curl"):
+        return None, "curl tidak ada"
+    for url in _IP_API:
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "--max-time", "15", "-A", WEB_UA, url],
+                capture_output=True, text=True, timeout=20)
+        except Exception:  # noqa: BLE001
+            continue
+        out = (r.stdout or "").strip()
+        if r.returncode != 0 or not out:
+            continue
+        try:
+            j = json.loads(out)
+        except Exception:  # noqa: BLE001
+            continue
+        if not j or j.get("success") is False:
+            continue
+        conn = j.get("connection") if isinstance(j.get("connection"), dict) else {}
+        tz = j.get("timezone")
+        if isinstance(tz, dict):
+            tz = tz.get("id") or tz.get("utc") or tz.get("abbr")
+        ip = j.get("ip") or j.get("query")
+        if not ip:
+            continue
+        return {"ip": ip,
+                "country": j.get("country"),
+                "region": j.get("region") or j.get("regionName"),
+                "city": j.get("city"),
+                "latitude": j.get("latitude") or j.get("lat"),
+                "longitude": j.get("longitude") or j.get("lon"),
+                "isp": j.get("isp") or conn.get("isp"),
+                "org": j.get("org") or conn.get("org"),
+                "timezone": tz}, None
+    return None, "gagal ambil geolocation IP"
+
+
+def _loc_lines(loc, label):
+    lines = [f"{label}:"]
+    if not loc:
+        lines.append("- tidak tersedia")
+        return lines
+    lat, lon = loc.get("latitude"), loc.get("longitude")
+    if lat is not None and lon is not None:
+        lines.append(f"- latitude: {lat:.6f}")
+        lines.append(f"- longitude: {lon:.6f}")
+        lines.append(f"- maps: https://www.google.com/maps?q={lat:.6f},{lon:.6f}")
+    if loc.get("altitude"):
+        lines.append(f"- altitude: {loc['altitude']:.0f} m")
+    if loc.get("accuracy"):
+        lines.append(f"- akurasi: ±{loc['accuracy']:.0f} m")
+    if loc.get("provider"):
+        lines.append(f"- provider: {loc['provider']}")
+    if loc.get("country"):
+        lines.append(f"- negara: {loc['country']}"
+                     f"{' / ' + str(loc['region']) if loc.get('region') else ''}")
+    if loc.get("city"):
+        lines.append(f"- kota: {loc['city']}")
+    if loc.get("isp"):
+        lines.append(f"- ISP: {loc['isp']}")
+    if loc.get("org"):
+        lines.append(f"- org: {loc['org']}")
+    if loc.get("timezone"):
+        lines.append(f"- zona waktu: {loc['timezone']}")
+    return lines
+
+
+def tool_locate(action=None, args=None):
+    """Cek lokasi LENGKAP dalam bentuk daftar (list).
+
+    action='all' (default): nyalain GPS via Termux-API (termux-location
+    -p gps) + geolocation dari IP publik. action='gps' cuma GPS,
+    action='ip' cuma IP."""
+    what = (action or "all").lower()
+    if what not in ("all", "gps", "ip"):
+        return (f"action tidak dikenal: {action!r}. action valid: "
+                "all | gps | ip")
+    lines = []
+    if what in ("all", "gps"):
+        loc, err = _loc_gps_fix()
+        if err and what == "gps":
+            return f"- GPS: {err}"
+        lines += _loc_lines(loc, "Lokasi GPS")
+    if what in ("all", "ip"):
+        jip, err = _loc_ip_geo()
+        if err and what == "ip":
+            return f"- IP: {err}"
+        geo = None
+        if jip:
+            geo = jip
+        lines += _loc_lines(geo, "Lokasi IP") if not jip else \
+            _loc_lines(geo, f"Lokasi IP ({jip.get('ip')})")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1903,6 +2095,7 @@ TOOL_IMPL = {
     "websearch": tool_web_search,
     "webfetch": tool_web_fetch,
     "device": tool_device,
+    "locate": tool_locate,
     "tree": tool_tree,
     "build": tool_build,
     "debug": tool_debug,
@@ -1923,6 +2116,6 @@ TOOL_IMPL = {
 # tool yang dianggap aman (tidak mengubah sistem) — tetap dikonfirmasi tapi
 # ditandai di prompt
 SAFE_TOOLS = {"read", "glob", "grep", "websearch", "webfetch", "tree", "logs",
-              "sys"}
+              "sys", "locate"}
 
 
