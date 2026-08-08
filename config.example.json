@@ -1,0 +1,15 @@
+{
+  "tg_bot_token": "",
+  "tg_chat_id": "",
+  "owner": {
+    "username": "denzyx",
+    "password_hash": "",
+    "salt": ""
+  },
+  "secret": "",
+  "price_idr": 20000,
+  "sub_days": 30,
+  "host": "0.0.0.0",
+  "port": 8000,
+  "ai": {"model": "deepseek-v4-flash-free", "max_tokens": 1024}
+}

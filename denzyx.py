@@ -3448,6 +3448,7 @@ def main_menu(stdscr, state):
         ("⚙️   Pengaturan", "temperature, key, dll"),
         ("ℹ️   Tentang denzyx AI", "versi & changelog"),
         ("🐛  Lapor Bug", "kirim laporan ke Telegram"),
+        ("🛡  Owner Panel", "owner panel member & langganan"),
         ("🚪  Keluar", "simpan & tutup"),
     ]
     sel = 0
@@ -3504,6 +3505,15 @@ def main_menu(stdscr, state):
                                f" Telegram: {BUG_LABEL} — {err}"
                                " (Enter) ")
             elif sel == 7:
+                # keluar dulu dari curses, jalankan owner panel, lalu balik
+                curses.endwin()
+                try:
+                    _admin = Path(__file__).with_name("admin-denz.py")
+                    subprocess.call([sys.executable, str(_admin)])
+                except Exception as e:  # noqa: BLE001
+                    input_line(stdscr, f" Owner panel: {e} (Enter) ")
+                stdscr.refresh()
+            elif sel == 8:
                 state.save_session()
                 return False
         elif ch == curses.KEY_RESIZE:

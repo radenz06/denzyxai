@@ -16,3 +16,7 @@ local.properties
 .pytest_cache/
 .coverage
 backup/
+
+# webdenz — data & konfigurasi lokal member
+webconfig.json
+webdata/
