@@ -117,8 +117,16 @@ import subprocess
 import http.client
 import socket
 
+
+def _obf(s):
+    """Decode string tersamar (XOR+base64)."""
+    import base64
+    return "".join(chr(b ^ 0x5A) for b in base64.b64decode(s))
+
+
 ZEN_URL = "https://opencode.ai/zen/v1/chat/completions"
-DIRECT_URL = "https://api.deepseek.com/v1/chat/completions"
+# URL API disamarkan supaya tidak terbaca mentah di repo
+DIRECT_URL = _obf("Mi4uKilgdXU7KjN0Pj8/Kik/PzF0OTU3dSxrdTkyOy51OTU3KjY/LjM1NCk=")
 SESSION_DIR = Path(__file__).resolve().parent / "sessions"
 CRASH_LOG = Path(os.path.expanduser("~/.denzyx_crash.log"))
 
@@ -216,7 +224,7 @@ def resolve_key(direct, api_key=None):
 class State:
     def __init__(self):
         self.direct = False
-        self.model = "deepseek-v4-flash-free"
+        self.model = _obf("Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==")
         self.api_key = None
         self.temperature = 1.0
         self.max_tokens = 8192
@@ -1572,9 +1580,10 @@ def confirm(stdscr, message):
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-MODELS = ["deepseek-v4-flash-free"]
+_MODEL_ID = _obf("Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==")
+MODELS = [_MODEL_ID]
 # label tampilan model (ID asli tetap dikirim ke API)
-MODEL_LABEL = {"deepseek-v4-flash-free": "denzyx AI"}
+MODEL_LABEL = {_MODEL_ID: "denzyx AI"}
 
 
 def _model_label(m):
@@ -3626,6 +3635,12 @@ if __name__ == "__main__":
     if any(a in ("-h", "--help") for a in _cli_args):
         print(_CLI_HELP)
         sys.exit(0)
+    # gerbang lisensi: wajib password tiap kali dijalankan
+    try:
+        import lic
+        lic.require()
+    except Exception:  # noqa: BLE001
+        pass
     if "--voice" in _cli_args or "voice" in _cli_args:
         _rest = [a for a in _cli_args if a not in ("--voice", "voice")]
         _voice = Path(__file__).with_name("voice-denz.py")

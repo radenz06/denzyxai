@@ -35,6 +35,14 @@ function api(path, data) {
   });
 }
 
+function tgLink(j) {
+  if (!j || !j.pay_link) return "";
+  try {
+    var m = j.pay_link.match(/href="([^"]+)"/);
+    return m ? m[1] : "";
+  } catch (e) { return ""; }
+}
+
 function doRegister() {
   var user = $("reg-user").value.trim(), pass = $("reg-pass").value,
       name = $("reg-name").value.trim();
@@ -47,10 +55,16 @@ function doRegister() {
   api("/api/register", { username: user, password: pass, display_name: name })
     .then(function (j) {
       if (j.ok) {
+        var link = tgLink(j);
         setMsg("reg-msg", "ok", "Berhasil daftar, " + esc(j.username) + ".<br>"
-          + "<b>Langkah aktivasi:</b><br>1. Chat owner di Telegram untuk minta QR<br>"
-          + "2. Bayar, lalu akun diaktifkan.<br>"
-          + (j.pay_link ? '<a class="paybtn" target="_blank" rel="noopener" href="' + esc(j.pay_link.replace('href="', '').replace('">', '"').match(/https:[^"]+/)[0]) + '">💬 Minta QR ke Owner</a>' : ""));
+          + "<b>Langkah aktivasi:</b><br>1. Chat bot Telegram untuk minta QR<br>"
+          + "2. Bayar, kirim bukti, lalu akun diaktifkan.<br>"
+          + (link ? '<a class="paybtn" target="_blank" rel="noopener" href="'
+            + esc(link) + '">💬 Chat Bot untuk QR</a>' : ""));
+        if (link) {
+          // arahkan langsung ke bot setelah daftar
+          setTimeout(function () { location.href = link; }, 1200);
+        }
       } else {
         setMsg("reg-msg", "err", esc(j.error || "Gagal daftar."));
       }
@@ -69,9 +83,9 @@ function doLogin() {
         try { localStorage.setItem("denz_token", j.token); } catch (e) {}
         showPanel(j);
       } else if (j.error) {
-        var extra = j.pay_link ? '<br><a class="paybtn" target="_blank" rel="noopener" href="'
-          + esc(j.pay_link.replace('href="', '').replace('">', '"').match(/https:[^"]+/)[0])
-          + '">💬 Minta QR ke Owner</a>' : "";
+        var link = tgLink(j);
+        var extra = link ? '<br><a class="paybtn" target="_blank" rel="noopener" href="'
+          + esc(link) + '">💬 Chat Bot untuk QR</a>' : "";
         setMsg("login-msg", "err", esc(j.error) + extra);
       }
     })
@@ -85,8 +99,7 @@ function showPanel(j) {
   var extra = "";
   if (st === "pending" && j.pay_link) {
     extra = '<a class="paybtn" target="_blank" rel="noopener" href="'
-      + esc(j.pay_link.replace('href="', '').replace('">', '"').match(/https:[^"]+/)[0])
-      + '">💬 Minta QR ke Owner</a>';
+      + esc(tgLink(j)) + '">💬 Chat Bot untuk QR</a>';
   }
   $("panel-msg").innerHTML =
     '<div class="status-line">Username: <b>' + esc(j.username) + "</b> " + badge + "</div>"

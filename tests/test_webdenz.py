@@ -175,10 +175,11 @@ class TestPages:
         webdenz.save_config(cfg)
         webdenz.create_member("budi", "pw123", "Budi")
         html = webdenz._status_page(webdenz.load_member("budi"))
-        assert "Minta QR ke Owner" in html
+        assert "Konfirmasi Aktivasi ke Telegram" in html
         assert "https://t.me/colipopi?text=" in html
-        assert "bisa kirimkan qr sekarang" in urllib.parse.unquote(
+        assert "aktivasi akun & konfirmasi pembayaran" in urllib.parse.unquote(
             webdenz._pay_tg_link(cfg, webdenz.load_member("budi")))
+        assert "/qr" in html
         # aktif → tombol hilang
         m = webdenz.load_member("budi")
         m["status"] = "active"
@@ -186,7 +187,7 @@ class TestPages:
         m["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
         webdenz.save_member(m)
         html2 = webdenz._status_page(webdenz.load_member("budi"))
-        assert "Minta QR ke Owner" not in html2
+        assert "Konfirmasi Aktivasi ke Telegram" not in html2
 
 
 class TestHTTP:

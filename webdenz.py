@@ -48,10 +48,18 @@ SUB_DAYS_DEFAULT = 30
 # Config
 # ---------------------------------------------------------------------------
 
+def _obf_decode(s):
+    """Decode string yang tersamar (XOR+base64) agar config AI tak terbaca mentah."""
+    import base64
+    raw = base64.b64decode(s)
+    return "".join(chr(b ^ 0x5A) for b in raw)
+
+
 _DEFAULTS = {
     "tg_bot_token": "",
     "tg_chat_id": "",
     "tg_owner_username": "",
+    "tg_bot_username": "",
     "owner": {"username": "denzyx", "password_hash": "", "salt": ""},
     "secret": "",
     "price_idr": PRICE_DEFAULT,
@@ -59,7 +67,9 @@ _DEFAULTS = {
     "qr_path": "",
     "host": "0.0.0.0",
     "port": 8000,
-    "ai": {"model": "deepseek-v4-flash-free", "max_tokens": 1024},
+    # model tersamar supaya tidak terbaca orang di GitHub
+    "ai": {"model": _obf_decode("Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw=="),
+           "max_tokens": 1024},
 }
 
 
@@ -382,6 +392,14 @@ th,td{text-align:left;padding:6px;border-bottom:1px solid #262b36}
 padding:16px;margin:14px 0;text-align:center}
 a.paybtn{display:inline-block;background:#2b6bff;color:#fff;padding:12px 18px;
 border-radius:10px;text-decoration:none;font-weight:700;font-size:16px}
+#wrap{position:relative}
+#sug{position:absolute;bottom:100%;left:0;right:0;background:#171a21;
+border:1px solid #333;border-radius:8px;max-height:180px;overflow:auto;
+z-index:10;margin-bottom:4px}
+#sug.hidden{display:none}
+.sugi{padding:8px 12px;cursor:pointer;font-size:14px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sugi:hover,.sugi.on{background:#2b6bff}
 """
 
 _PAGE = """<!doctype html><html lang="id"><head><meta charset="utf-8">
@@ -396,9 +414,21 @@ def page(title, body, subtitle="member area"):
     return _PAGE.format(title=title, css=_CSS, body=body, subtitle=subtitle)
 
 
+def _qr_source(cfg):
+    """Cari file QR pembayaran. Prioritas: config → /storage/emulated/0/qr.jpg
+    (folder internal Android) → /sdcard/qr.jpg."""
+    cands = [cfg.get("qr_path") or "",
+             "/storage/emulated/0/qr.jpg",
+             "/sdcard/qr.jpg"]
+    for p in cands:
+        if p and Path(p).exists():
+            return str(Path(p))
+    return ""
+
+
 def _qr_html(cfg):
-    qr = cfg.get("qr_path")
-    if qr and Path(qr).exists():
+    qr = _qr_source(cfg)
+    if qr:
         return (f'<p><img src="/qr" alt="QR pembayaran" '
                 f'style="max-width:220px;border-radius:10px"></p>')
     return ("<p><small>QR pembayaran belum dipasang — transfer ke kontak owner "
@@ -418,10 +448,11 @@ def _login_page(cfg, msg="", err=""):
 def _register_page(cfg, msg="", err="", m=None):
     pay = ""
     if m and member_status(m) == "pending":
-        pay = f"""<div class="paycard"><b>Langkah aktivasi:</b><br>
-1. Klik tombol di bawah untuk chat owner di Telegram<br>
-2. Kirim bukti & dapatkan QR pembayaran<br>
-3. Setelah dibayar, akun kamu diaktifkan otomatis
+        pay = f"""<div class="paycard">{_qr_html(cfg)}
+<b>Langkah aktivasi:</b><br>
+1. Scan QR di atas lalu transfer <b>Rp {cfg.get('price_idr'):,}</b><br>
+2. Setelah transfer, klik tombol di bawah untuk konfirmasi ke Telegram<br>
+3. Setelah dikonfirmasi, akun kamu aktif otomatis
 {_pay_tg_link(cfg, m)}
 <p><small>Status kamu: <b>menunggu konfirmasi</b></small></p></div>"""
     body = f"""<div class="card"><h3>Registrasi Member</h3>
@@ -447,39 +478,101 @@ def _flash(msg, err):
 
 
 def _pay_tg_link(cfg, m):
-    """Link Telegram DM ke owner dengan pesan permintaan QR (blank payment)."""
+    """Link Telegram ke OWNER (DM) untuk aktivasi akun & konfirmasi pembayaran."""
     owner = (cfg.get("tg_owner_username") or "").strip().lstrip("@")
     if not owner:
         return ""
-    text = ("halo bang denz, ane mau berlanggan denzyx ai, "
-            "bisa kirimkan qr sekarang?")
+    text = ("halo bang denz, aku mau aktivasi akun & konfirmasi pembayaran "
+            "langganan denzyx ai")
     if m and m.get("username"):
         text += f"\nusername: {m['username']}"
     url = "https://t.me/" + urllib.parse.quote(owner)
-    return f'<a class="paybtn" target="_blank" rel="noopener" href="{url}?text={urllib.parse.quote(text)}">💬 Minta QR ke Owner</a>'
+    return (f'<a class="paybtn" target="_blank" rel="noopener" '
+            f'href="{url}?text={urllib.parse.quote(text)}">'
+            f'💬 Konfirmasi Aktivasi ke Telegram</a>')
+
+
+# contoh prompt untuk autosuggestion di kolom chat
+_CHAT_SUGGEST = [
+    "halo, apa kabar?",
+    "siapa kamu?",
+    "buatkan puisi pendek",
+    "jelaskan cara kerja denzyx AI",
+    "tuliskan kode python untuk menghitung fibonacci",
+    "apa itu machine learning?",
+    "beri ide nama untuk toko online",
+    "terjemahkan kalimat ini ke bahasa inggris",
+    "rangkum teks berikut",
+    "buatkan resep masakan sederhana",
+    "apa rekomendasi anime terbaik?",
+    "bagaimana cara beli langganan denzyx AI?",
+]
 
 
 def _chat_page(m, cfg):
     msgs_html = ""
+    hist = []
     for x in m.get("messages") or []:
         cls = "user" if x.get("role") == "user" else "ai"
         who = "Kamu" if x.get("role") == "user" else "Denzyx"
         body = x.get("content") or ""
         msgs_html += (f'<div class="msg {cls}"><small>{who}</small><br>'
                       f"{body}</div>")
+        if x.get("role") == "user" and body.strip():
+            hist.append(body.strip())
+    hist_js = json.dumps(hist[-10:][::-1], ensure_ascii=False)
+    samples_js = json.dumps(_CHAT_SUGGEST, ensure_ascii=False)
     return page("Chat", f"""
 <div class="toolbar"><a href="/chat">Chat</a>
 <a href="/status">Status Langganan</a>
 <a href="/logout">Logout</a></div>
 <div id="msgs">{msgs_html}</div>
-<form id="fm"><input id="inp" placeholder="ketik pesan..." autocomplete="off">
+<form id="fm"><div id="wrap">
+<input id="inp" placeholder="ketik pesan..." autocomplete="off">
+<div id="sug" class="hidden"></div>
+</div>
 <button type="submit">Kirim</button></form>
 <script>
 const inp=document.getElementById('inp');
 const fm=document.getElementById('fm');
 const msgs=document.getElementById('msgs');
+const sug=document.getElementById('sug');
+const HIST={hist_js};
+const SAMPLES={samples_js};
+const ALL=[].concat(HIST,SAMPLES);
+let hidx=-1;
+function esc2(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+inp.addEventListener('input',()=>{{
+ const v=inp.value.trim().toLowerCase();
+ const list=ALL.filter(s=>s.toLowerCase().startsWith(v)).slice(0,8);
+ if(!v||!list.length){{sug.classList.add('hidden');sug.innerHTML='';hidx=-1;return;}}
+ sug.innerHTML=list.map((s,i)=>
+  '<div class="sugi" data-i="'+i+'">'+esc2(s)+'</div>').join('');
+ sug.classList.remove('hidden');
+ hidx=-1;
+ const items=sug.querySelectorAll('.sugi');
+ items.forEach(el=>el.onclick=()=>{{inp.value=el.textContent;hideSug();inp.focus();}});
+}});
+function hideSug(){{sug.classList.add('hidden');sug.innerHTML='';hidx=-1;}}
+inp.addEventListener('keydown',e=>{{
+ const items=sug.querySelectorAll('.sugi');
+ if(items.length&&(e.key==='ArrowDown'||e.key==='ArrowUp')){{
+  e.preventDefault();
+  hidx=(hidx+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;
+  items.forEach((el,i)=>el.classList.toggle('on',i===hidx));
+  return;
+ }}
+ if(items.length&&(e.key==='Enter'||e.key==='Tab')&&hidx>=0){{
+  e.preventDefault();
+  inp.value=items[hidx].textContent;
+  hideSug();
+  return;
+ }}
+ if(e.key==='Escape')hideSug();
+}});
 fm.onsubmit=async e=>{{e.preventDefault();
 const v=inp.value.trim();if(!v)return;inp.value='';
+hideSug();
 msgs.insertAdjacentHTML('beforeend',
  '<div class="msg user"><small>Kamu</small><br>'+v.replace(/</g,'&lt;')+'</div>');
 const d=document.createElement('div');
@@ -501,10 +594,12 @@ def _status_page(m):
     pay = ""
     if st == "pending":
         cfg = load_config()
-        pay = f"""<div class="paycard"><b>Akun belum aktif</b><br>
-Chat owner di Telegram untuk minta QR pembayaran:
+        pay = f"""<div class="paycard">{_qr_html(cfg)}<b>Akun belum aktif</b><br>
+1. Scan QR di atas lalu transfer <b>Rp {cfg.get('price_idr'):,}</b><br>
+2. Setelah transfer, klik tombol di bawah untuk konfirmasi ke Telegram<br>
+3. Setelah dikonfirmasi, akun otomatis aktif
 {_pay_tg_link(cfg, m)}
-<p><small>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari — setelah dibayar akun otomatis aktif</small></p></div>"""
+<p><small>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari — transfer & kirim bukti, akun otomatis aktif setelah dikonfirmasi</small></p></div>"""
     return page("Status", f"""<div class="card"><h3>Status Langganan</h3>
 {pay}
 <p>Username: <b>{m['username']}</b> {badge}</p>
@@ -788,8 +883,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- handlers ---
     def _serve_qr(self, cfg):
-        qr = cfg.get("qr_path")
-        if not qr or not Path(qr).exists():
+        qr = _qr_source(cfg)
+        if not qr:
             self._send(404, "no qr")
             return
         ctype = mimetypes.guess_type(qr)[0] or "image/jpeg"
@@ -964,6 +1059,13 @@ def start_server(cfg=None, quiet=False):
 
 
 def run_server(cfg=None):
+    try:
+        import lic
+        lic.require()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     start_server(cfg)
 
 

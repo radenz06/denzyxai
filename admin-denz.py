@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lic  # noqa: E402
 import webdenz  # noqa: E402
 import denzbot  # noqa: E402
 
@@ -67,6 +68,9 @@ def _status():
     print(f"  Server     : {cfg.get('host')}:{cfg.get('port')} "
           f"({'JALAN' if _alive(sp) else 'MATI'})")
     print(f"  Bot TG     : {'JALAN' if _alive(bp) else 'MATI'}")
+    tp = tunnel_pid()
+    print(f"  Tunnel CF  : {'JALAN' if (tp and _alive(tp)) else 'MATI'}"
+          + (f"  → {_tunnel_url()}" if (tp and _alive(tp)) else ""))
     print(f"  Member     : {len(members)} total "
           f"(aktif {active} / pending {pending} / banned {banned})")
     print(f"  Harga      : Rp {cfg.get('price_idr'):,} / "
@@ -221,8 +225,63 @@ def _stop(which):
     (PID_DIR / f"{which}.pid").unlink(missing_ok=True)
 
 
+def tunnel_pid():
+    try:
+        if (PID_DIR / "tunnel.pid").exists():
+            return int((PID_DIR / "tunnel.pid").read_text().strip())
+    except ValueError:
+        return None
+    return None
+
+
+def _tunnel_url():
+    log = (PID_DIR / "tunnel.log")
+    if not log.exists():
+        return ""
+    for line in reversed(log.read_text(encoding="utf-8", errors="replace")
+                        .splitlines()):
+        for tok in line.split():
+            if "trycloudflare.com" in tok:
+                return tok.strip()
+    return ""
+
+
+def _start_tunnel():
+    pid = tunnel_pid()
+    if pid and _alive(pid):
+        print(f"  ✓ tunnel jalan (pid {pid}) → {_tunnel_url()}")
+        return
+    import shutil
+    which = shutil.which("cloudflared")
+    if not which:
+        print("  ❌ cloudflared tidak terpasang (pkg install cloudflared)")
+        return
+    import subprocess
+    log = PID_DIR / "tunnel.log"
+    logf = open(log, "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        [which, "tunnel", "--url", "http://localhost:8000",
+         "--protocol", "http2"],
+        stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+    PID_DIR.joinpath("tunnel.pid").write_text(str(proc.pid))
+    print(f"  🔄 tunnel start → pid {proc.pid} (URL menyusul ~5-10 dtk)")
+
+
+def _stop_tunnel():
+    pid = tunnel_pid()
+    if not pid:
+        print("  tunnel tidak jalan")
+        return
+    try:
+        os.kill(pid, 9)
+        print(f"  ⏹ tunnel (pid {pid}) dihentikan")
+    except OSError as e:
+        print(f"  ⏹ tunnel: {e}")
+    (PID_DIR / "tunnel.pid").unlink(missing_ok=True)
+
+
 def _ensure():
-    """Pastikan server + bot jalan (start kalau mati). Return bool semua ok."""
+    """Pastikan server + bot + tunnel jalan (start kalau mati). Return bool semua ok."""
     sp, bp = _pids()
     result = True
     if not (sp and _alive(sp)):
@@ -235,14 +294,22 @@ def _ensure():
         result = False
     else:
         print(f"  ✓ bot jalan (pid {bp})")
+    tp = tunnel_pid()
+    if not (tp and _alive(tp)):
+        _start_tunnel()
+        result = False
+    else:
+        print(f"  ✓ tunnel jalan (pid {tp}) → {_tunnel_url()}")
     return result
 
 
 def _restart_all():
     _stop("server")
     _stop("bot")
+    _stop_tunnel()
     _restart("server")
     _restart("bot")
+    _start_tunnel()
 
 
 def _menu():
@@ -253,6 +320,8 @@ def _menu():
   [3] Activate member        [8] Setup config
   [4] Ban member             [9] Test notifikasi TG
   [5] Unban member           [R] Restart server/bot
+                             [P] Ganti password lisensi
+                             [T] Start tunnel     [U] URL tunnel
                              [Q] Keluar
   """)
     c = input("  > ").strip().lower()
@@ -276,6 +345,12 @@ def _menu():
         _setup()
     elif c == "9":
         _test_tg()
+    elif c == "p":
+        lic.setpass()
+    elif c == "t":
+        _start_tunnel()
+    elif c == "u":
+        print(" ", _tunnel_url())
     elif c == "r":
         _restart(input("  server atau bot? ").strip().lower())
     elif c == "q":
@@ -291,6 +366,15 @@ def main():
     if len(sys.argv) > 1:
         # mode CLI langsung
         arg = sys.argv[1].lower()
+        if arg == "setpass":
+            sys.exit(lic.setpass())
+        # gerbang lisensi untuk semua perintah lain
+        try:
+            lic.require()
+        except SystemExit:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
         if arg == "setup":
             _setup()
         elif arg == "list":
@@ -309,9 +393,21 @@ def main():
             _ensure()
         elif arg == "restart":
             _restart_all()
+        elif arg == "start-tunnel":
+            _start_tunnel()
+        elif arg == "stop-tunnel":
+            _stop_tunnel()
+        elif arg == "url":
+            print(_tunnel_url())
         else:
             print(__doc__)
         return
+    try:
+        lic.require()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     while _menu():
         input("  (Enter lanjut) ")
 

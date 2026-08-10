@@ -460,4 +460,11 @@ def main():
 
 
 if __name__ == "__main__":
+    try:
+        import lic
+        lic.require()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     main()

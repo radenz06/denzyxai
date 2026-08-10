@@ -9,8 +9,10 @@
 """
 
 import json
+import re
 import sys
 import time
+import uuid
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -45,6 +47,40 @@ def tg_send(chat_id, text, token=None):
     return tg_api(token, "sendMessage",
                   {"chat_id": str(chat_id), "text": str(text)[:4000],
                    "disable_web_page_preview": True})
+
+
+def tg_send_photo(chat_id, photo, caption="", token=None):
+    """Kirim foto (QR pembayaran) via multipart/form-data — tanpa dependency."""
+    cfg = webdenz.load_config()
+    token = token or cfg.get("tg_bot_token")
+    photo = str(photo)
+    if not token or not chat_id or not Path(photo).exists():
+        return {"ok": False, "description": "photo/token/chat_id tidak valid"}
+    boundary = "----denzbot" + uuid.uuid4().hex
+    data = Path(photo).read_bytes()
+    head = (f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{chat_id}\r\n'
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+            f"{caption}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="photo"; '
+            f'filename="{Path(photo).name}"\r\n'
+            f"Content-Type: image/jpeg\r\n\r\n").encode("utf-8")
+    tail = ("\r\n" + "--" + boundary + "--\r\n").encode("utf-8")
+    url = f"{API}/bot{token}/sendPhoto"
+    req = urllib.request.Request(
+        url, data=head + data + tail,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "User-Agent": "denzbot"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"ok": False,
+                "description": e.read().decode("utf-8", errors="replace")[:300]}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "description": str(e)}
 
 
 def tg_notify(text):
@@ -141,6 +177,11 @@ def _cmd_set_member(action, arg, days=None):
     webdenz.save_member(m)
     webdenz.write_session_md(m)
     webdenz.log_activity(action, username)
+    if action == "activate" and m.get("tg_chat_id"):
+        tg_send(m["tg_chat_id"],
+                f"🎉 Akun {username} sudah AKTIF!\n"
+                f"Login di web (username: {username}) dan mulai pakai denzyx AI. "
+                f"Langganan s/d {m.get('expires_at')}")
     return f"✅ {action} {username} → {webdenz.member_status(m)}"
 
 
@@ -153,6 +194,106 @@ _HANDLERS = {
     "/unban": lambda c, a: _cmd_set_member("unban", a),
     "/activate": lambda c, a: _cmd_set_member("activate", a),
 }
+
+
+# ---------------------------------------------------------------------------
+# Alur member (calon pembeli yang chat bot)
+# ---------------------------------------------------------------------------
+
+def _extract_username(text):
+    """Ambil username dari pesan: 'username: budi' / 'username budi'."""
+    if not text:
+        return None
+    m = re.search(r"(?:username\s*[:\s=]\s*)(\w+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    for tok in text.split():
+        if tok.startswith("@"):
+            return tok[1:]
+    return None
+
+
+def _member_tg(chat_id):
+    """Cari member yang chat_id TG-nya sudah tersimpan."""
+    for mm in webdenz.list_members():
+        if str(mm.get("tg_chat_id") or "") == str(chat_id):
+            return mm
+    return None
+
+
+def _save_tg(chat_id):
+    """Simpan chat_id TG ke member terakhir yang chat (kalau dikenali)."""
+    if not chat_id:
+        return None
+    m = _member_tg(chat_id)
+    if m:
+        return m
+    return None
+
+
+def _send_qr(m, chat_id):
+    """Kirim foto QR pembayaran + panduan ke chat member."""
+    cfg = webdenz.load_config()
+    qr = webdenz._qr_source(cfg)
+    if not qr:
+        return ("QR pembayaran belum dipasang di server. "
+                "Hubungi owner: @" + (cfg.get("tg_owner_username") or "admin"))
+    caption = (f"Halo {m.get('display_name') or m.get('username')} 👋\n"
+               f"Untuk langganan denzyx AI:\n"
+               f"• Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari\n"
+               f"• Transfer ke QR di atas, lalu kirim bukti ke bot ini.\n"
+               f"• Setelah dikonfirmasi owner, akun otomatis aktif.\n"
+               f"username: {m.get('username')}")
+    r = tg_send_photo(chat_id, qr, caption)
+    if r.get("ok"):
+        return ("✅ QR pembayaran terkirim. Setelah transfer, "
+                "kirim foto bukti ke bot ini, ya.")
+    return "Gagal kirim QR: " + str(r.get("description"))[:120]
+
+
+def handle_member_message(chat_id, text="", has_photo=False, caption=""):
+    """Tangani pesan dari member/pembeli (bukan owner).
+
+    Alur: chat bot → bot kirim QR → kirim bukti → owner konfirmasi → aktif.
+    """
+    cfg = webdenz.load_config()
+    m = _member_tg(chat_id)
+    if not m:
+        uname = _extract_username(text or caption)
+        if uname:
+            m = webdenz.load_member(uname)
+        else:
+            return ("Halo! Untuk langganan denzyx AI, kirim username kamu:\n"
+                    "username: <username-nya>\n\n"
+                    "(username = yang kamu pakai saat daftar di web)")
+
+    if not m:
+        return "Username tidak ditemukan. Sudah daftar di web dulu, ya? 😊"
+
+    m["tg_chat_id"] = str(chat_id)
+    webdenz.save_member(m)
+
+    st = webdenz.member_status(m)
+    if st == "banned":
+        return f"⛔ Akun {m.get('username')} diblokir. Hubungi owner."
+    if st == "active":
+        return (f"✅ Akun {m.get('username')} sudah AKTIF.\n"
+                f"Login di web: /login (username: {m.get('username')})")
+
+    if has_photo:
+        webdenz.log_activity("bukti", m.get("username"))
+        tg_notify(f"🧾 BUKTI PEMBAYARAN dari {m.get('username')} "
+                  f"({m.get('display_name')})\n"
+                  f"Chat id: {chat_id}\n"
+                  f"Reply: /activate {m.get('username')}")
+        return ("📥 Bukti terkirim ke owner. "
+                "Begitu dikonfirmasi, akun kamu langsung aktif. "
+                "Nanti kamu terima notifikasi di sini 👍")
+
+    if st == "expired":
+        return ("⏰ Langganan sudah kedaluwarsa. "
+                "Transfer ulang via QR berikut untuk perpanjang:")
+    return _send_qr(m, chat_id)
 
 
 def handle_message(text):
@@ -219,15 +360,33 @@ def run_bot(stop_evt=None, verbose=True):
             chat = msg.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             text = msg.get("text") or ""
-            if not text:
+            has_photo = bool(msg.get("photo"))
+            caption = msg.get("caption") or ""
+            if chat_id == owner_id:
+                if not text and has_photo:
+                    continue
+                if not text:
+                    continue
+                reply = handle_message(text)
+                tg_send(owner_id, reply)
                 continue
-            if chat_id != owner_id:
-                tg_send(chat_id,
-                        "Bot ini khusus admin. Kamu bukan admin.")
-                continue
-            reply = handle_message(text)
-            tg_send(owner_id, reply)
+            # --- alur member / pembeli ---
+            reply = handle_member_message(chat_id, text, has_photo, caption)
+            tg_send(chat_id, reply)
+            if has_photo:
+                # forward foto bukti ke owner
+                photo = msg["photo"][-1]["file_id"]
+                tg_api(cfg.get("tg_bot_token"), "sendPhoto",
+                       {"chat_id": owner_id, "photo": photo,
+                        "caption": f"🧾 Bukti pembayaran dari {_extract_username(text or caption) or chat_id}"})
 
 
 if __name__ == "__main__":
+    try:
+        import lic
+        lic.require()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     run_bot()
