@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lic  # noqa: E402
+import auth  # noqa: E402
 import webdenz  # noqa: E402
 import denzbot  # noqa: E402
 
@@ -363,18 +364,24 @@ def _menu():
 def main():
     webdenz._mkdirs()
     PID_DIR.mkdir(parents=True, exist_ok=True)
+    # gerbang lisensi + login OWNER untuk seluruh admin CLI (owner panel).
+    try:
+        lic.require()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        auth.require_terminal(owner_only=True)
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     if len(sys.argv) > 1:
         # mode CLI langsung
         arg = sys.argv[1].lower()
         if arg == "setpass":
             sys.exit(lic.setpass())
-        # gerbang lisensi untuk semua perintah lain
-        try:
-            lic.require()
-        except SystemExit:
-            raise
-        except Exception:  # noqa: BLE001
-            pass
         if arg == "setup":
             _setup()
         elif arg == "list":
@@ -402,12 +409,6 @@ def main():
         else:
             print(__doc__)
         return
-    try:
-        lic.require()
-    except SystemExit:
-        raise
-    except Exception:  # noqa: BLE001
-        pass
     while _menu():
         input("  (Enter lanjut) ")
 

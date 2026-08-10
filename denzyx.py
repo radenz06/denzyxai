@@ -3641,12 +3641,21 @@ if __name__ == "__main__":
         lic.require()
     except Exception:  # noqa: BLE001
         pass
+    # gerbang member/owner: wajib login dulu (member aktif berbayar / owner)
+    try:
+        import auth
+        auth.require_terminal()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     if "--voice" in _cli_args or "voice" in _cli_args:
         _rest = [a for a in _cli_args if a not in ("--voice", "voice")]
         _voice = Path(__file__).with_name("voice-denz.py")
         sys.exit(subprocess.call([sys.executable, str(_voice)] + _rest))
-    # auto-start web server + bot telegram (kecuali --noweb)
-    if "--noweb" not in _cli_args:
+    # auto-start web server + bot telegram (kecuali --noweb, dan hanya
+    # untuk OWNER — web member area adalah milik server owner, bukan tiap member)
+    if "--noweb" not in _cli_args and os.environ.get("DENZYX_TERM_ROLE") == "owner":
         try:
             _admin = Path(__file__).with_name("admin-denz.py")
             subprocess.call([sys.executable, str(_admin), "ensure"])

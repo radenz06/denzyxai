@@ -467,4 +467,11 @@ if __name__ == "__main__":
         raise
     except Exception:  # noqa: BLE001
         pass
+    try:
+        import auth
+        auth.require_terminal()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
     main()
