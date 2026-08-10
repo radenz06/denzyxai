@@ -7,13 +7,13 @@ dan cukup lengkap buat bikin aplikasi — dari Python sampe Android APK.
 
 ```text
 ┌─ denzyx AI ─────────────────────────────────┐
-│                                             │
-│   🛰  >  chat                               │
-│       riwayat sesi                          │
-│       statistik & konteks                   │
-│       ...
-│                                             │
-└─────────────────────────────────────────────┘
+│                                                   │
+│   🛰  >  chat                                     │
+│       riwayat sesi                                │
+│       statistik & konteks                         │
+│       ...                                         │
+│                                                   │
+└───────────────────────────────────────────┘
 ```
 
 Tanpa API key pun jalan — otomatis turun ke free tier. Key (kalau punya)
