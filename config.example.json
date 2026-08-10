@@ -11,6 +11,8 @@
   "secret": "",
   "price_idr": 20000,
   "sub_days": 30,
+  "qr_url": "https://files.catbox.moe/k5d36r.jpg",
+  "qr_path": "",
   "host": "0.0.0.0",
   "port": 8000,
   "ai": {"model": "Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==", "max_tokens": 1024}

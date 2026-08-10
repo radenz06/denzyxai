@@ -15,6 +15,8 @@ Sesi:
 
 Role:
 - owner  → akses penuh (termasuk admin CLI / owner panel).
+- admin  → reseller: akses TUI + menambah member (via bot/web), bukan
+  owner panel.
 - member → hanya kalau status "active" (langganan berbayar). pending /
   expired / banned ditolak sesuai status.
 """
@@ -61,7 +63,8 @@ def login(username, password):
             return None
     except Exception:  # noqa: BLE001
         return None
-    return {"role": "member", "username": username,
+    role = "admin" if webdenz.is_admin(m) else "member"
+    return {"role": role, "username": username,
             "status": webdenz.member_status(m)}
 
 
@@ -90,7 +93,8 @@ def _bootstrap_owner(username):
 
 def _env_ok():
     return (os.environ.get("DENZYX_TERM_USER")
-            and os.environ.get("DENZYX_TERM_ROLE") in ("owner", "member"))
+            and os.environ.get("DENZYX_TERM_ROLE")
+            in ("owner", "member", "admin"))
 
 
 def _load_session():
@@ -99,7 +103,7 @@ def _load_session():
         exp = datetime.fromisoformat(data["expires"])
         if exp < datetime.now():
             return None
-        if data.get("role") not in ("owner", "member"):
+        if data.get("role") not in ("owner", "member", "admin"):
             return None
         return data
     except (OSError, json.JSONDecodeError, KeyError, ValueError):

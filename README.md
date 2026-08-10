@@ -44,9 +44,13 @@ tapi serius kalau disuruh kerja.
   lewat **cloudflared** (link baru tiap run, dijamin selalu bisa diakses).
 - **Owner panel** (`admin-denz.py`) — kelola member (activate/ban/extend),
   lihat log registrasi, setup config, restart server/bot/tunnel, dan
-  ganti password lisensi.
+  ganti password lisensi. Member dengan role **admin (reseller)** bisa
+  menambah member lewat web (`/admin/add`) atau bot (`/addmember`).
 - **Bot Telegram** (`denzbot.py`) — notifikasi registrasi & login member,
-  kirim QR, dan aktivasi ke owner.
+  kirim QR, dan aktivasi ke owner. **Daftar 2 metode**: registrasi di web,
+  atau request langsung dari bot (`/daftar <username> <password>`) → owner
+  tinggal `/approve <username>` dari chat. Owner juga bisa langsung
+  `/addmember <user> <pass> [hari]` dan `/addadmin <user>`.
 - **Lisensi berpassword** (`lic.py`) — project **nggak bisa dijalankan
   tanpa password lisensi**. Password ter-hash (PBKDF2), nggak pernah
   disimpan plaintext. Owner ganti lewat `python3 admin-denz.py setpass`.

@@ -64,6 +64,7 @@ _DEFAULTS = {
     "secret": "",
     "price_idr": PRICE_DEFAULT,
     "sub_days": SUB_DAYS_DEFAULT,
+    "qr_url": "",
     "qr_path": "",
     "host": "0.0.0.0",
     "port": 8000,
@@ -189,6 +190,7 @@ def create_member(username, password, display_name="", ip=""):
         "username": username,
         "display_name": display_name or username,
         "password": enc_secret(password),
+        "role": "member",             # member | admin (reseller)
         "created_at": _now_iso(),
         "paid_at": None,
         "expires_at": None,
@@ -218,6 +220,36 @@ def member_status(m):
     if exp and _parse_dt(exp) < datetime.now():
         return "expired"
     return "active"
+
+
+def is_admin(m):
+    """Role 'admin' = reseller: boleh menambah member, bukan mengelola penuh."""
+    return bool(m) and m.get("role") == "admin"
+
+
+def add_member_active(username, password, display_name="", days=None,
+                      role="member", by=""):
+    """Tambah member LANGSUNG aktif (dipakai owner/admin add via bot/web/CLI)."""
+    cfg = load_config()
+    m = create_member(username, password, display_name)
+    m["role"] = role
+    m["status"] = "active"
+    m["paid_at"] = _now_iso()
+    m["expires_at"] = (datetime.now() + timedelta(
+        days=int(days or cfg.get("sub_days", 30)))).isoformat(timespec="seconds")
+    save_member(m)
+    write_session_md(m)
+    log_activity("add", f"{username} (by {by or role})")
+    return m
+
+
+def delete_member(username):
+    """Hapus file member (dipakai tolak request / hapus akun)."""
+    try:
+        member_path(username).unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _parse_dt(s):
@@ -262,6 +294,7 @@ def write_session_md(m):
     lines = [f"# Sesi member: {username}",
              "",
              f"- Nama: {m.get('display_name', username)}",
+             f"- Role: {m.get('role') or 'member'}",
              f"- Status: {member_status(m)}",
              f"- Aktif s/d: {m.get('expires_at') or '-'}",
              f"- Terdaftar: {m.get('created_at')}",
@@ -415,8 +448,11 @@ def page(title, body, subtitle="member area"):
 
 
 def _qr_source(cfg):
-    """Cari file QR pembayaran. Prioritas: config → /storage/emulated/0/qr.jpg
-    (folder internal Android) → /sdcard/qr.jpg."""
+    """Sumber QR pembayaran: link URL (qr_url) ATAU file lokal (qr_path /
+    /storage/emulated/0/qr.jpg). URL didahulukan."""
+    url = (cfg.get("qr_url") or "").strip()
+    if url.startswith(("http://", "https://")):
+        return url
     cands = [cfg.get("qr_path") or "",
              "/storage/emulated/0/qr.jpg",
              "/sdcard/qr.jpg"]
@@ -428,6 +464,9 @@ def _qr_source(cfg):
 
 def _qr_html(cfg):
     qr = _qr_source(cfg)
+    if qr.startswith(("http://", "https://")):
+        return (f'<p><img src="{html_esc(qr)}" alt="QR pembayaran" '
+                f'style="max-width:220px;border-radius:10px"></p>')
     if qr:
         return (f'<p><img src="/qr" alt="QR pembayaran" '
                 f'style="max-width:220px;border-radius:10px"></p>')
@@ -522,10 +561,12 @@ def _chat_page(m, cfg):
             hist.append(body.strip())
     hist_js = json.dumps(hist[-10:][::-1], ensure_ascii=False)
     samples_js = json.dumps(_CHAT_SUGGEST, ensure_ascii=False)
+    tool = '<a href="/chat">Chat</a><a href="/status">Status Langganan</a>'
+    if is_admin(m):
+        tool += '<a href="/admin/add">+ Tambah Member</a>'
+    tool += '<a href="/logout">Logout</a>'
     return page("Chat", f"""
-<div class="toolbar"><a href="/chat">Chat</a>
-<a href="/status">Status Langganan</a>
-<a href="/logout">Logout</a></div>
+<div class="toolbar">{tool}</div>
 <div id="msgs">{msgs_html}</div>
 <form id="fm"><div id="wrap">
 <input id="inp" placeholder="ketik pesan..." autocomplete="off">
@@ -611,10 +652,15 @@ def _status_page(m):
 
 def _owner_page(cfg, msg="", err=""):
     rows = []
+    admins = 0
     for m in list_members():
         st = member_status(m)
         badge = f'<span class="badge {st}">{st}</span>'
-        rows.append(f"<tr><td>{m['username']}</td><td>{m.get('display_name','-')}"
+        role_tag = (' <span class="badge admin">ADMIN</span>'
+                    if is_admin(m) else '')
+        if is_admin(m):
+            admins += 1
+        rows.append(f"<tr><td>{m['username']}{role_tag}</td><td>{m.get('display_name','-')}"
                     f"</td><td>{badge}</td><td>{m.get('expires_at') or '-'}</td>"
                     f"<td><a href='/owner/member/{m['username']}'>detail</a></td></tr>")
     table = ("<table><tr><th>username</th><th>nama</th><th>status</th>"
@@ -624,9 +670,25 @@ def _owner_page(cfg, msg="", err=""):
 <a href="/owner/register">+ Daftarkan Member</a><a href="/logout">Logout</a></div>
 {_flash(msg, err)}
 <div class="card"><h3>Owner Panel</h3>
-<p>Member: {len(list_members())} · Server: {cfg.get('host')}:{cfg.get('port')}
+<p>Member: {len(list_members())} · Admin: {admins} · Server: {cfg.get('host')}:{cfg.get('port')}
  · Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</p></div>
 <div class="card">{table}</div>""", subtitle="owner")
+
+
+def _admin_add_page(cfg, msg="", err=""):
+    body = f"""<div class="card"><h3>Tambah Member Baru (reseller)</h3>
+<p><small>Member langsung AKTIF, durasi <b>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</b>.</small></p>
+{_flash(msg, err)}
+<form method="post" action="/admin/add">
+<input name="username" placeholder="username (login)" required>
+<input name="display_name" placeholder="nama panggilan">
+<input name="password" type="password" placeholder="password" required>
+<input name="days" value="{cfg.get('sub_days')}" style="width:70px">
+<button type="submit">Buat Member</button></form></div>"""
+    return page("Tambah Member", f"""<div class="toolbar">
+<a href="/chat">Chat</a><a href="/status">Status Langganan</a>
+<a href="/admin/add">+ Tambah Member</a><a href="/logout">Logout</a></div>
+{body}""", subtitle="admin")
 
 
 def _owner_member_page(m):
@@ -644,10 +706,18 @@ def _owner_member_page(m):
 <button class="ok" name="action" value="unban">Unban</button></form>
 <form method="post" style="display:inline">
 <input name="days" value="30" style="width:70px;display:inline">
-<button name="action" value="extend">Perpanjang (hari)</button></form>"""
+<button name="action" value="extend">Perpanjang (hari)</button></form>
+"""
+    if m.get("role") == "admin":
+        act += ('<form method="post" style="display:inline">'
+                '<button name="action" value="demote">Turunkan jadi member</button></form>')
+    else:
+        act += ('<form method="post" style="display:inline">'
+                '<button class="ok" name="action" value="makeadmin">Jadikan Admin</button></form>')
     return page(f"Member {m['username']}", f"""<div class="card">
 <a href="/owner">← Owner Panel</a>
 <h3>Member: {m['username']} <span class="badge {st}">{st}</span></h3>
+<p>Role: <b>{m.get('role') or 'member'}</b></p>
 <p>Nama: {m.get('display_name','-')}</p>
 <p>Password (encrypt di simpan, ini buat owner): <code>{pw}</code></p>
 <p>Aktif s/d: <b>{m.get('expires_at') or '-'}</b></p>
@@ -744,6 +814,13 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_owner(self):
         return owner_token_valid(self._cookies().get("denz_owner"))
 
+    def _auth_admin(self):
+        """Member ber-role admin (reseller) yang sudah login."""
+        m, _ = self._auth_member()
+        if m and is_admin(m):
+            return m
+        return None
+
     # --- routes ---
     def do_OPTIONS(self):
         self._send(204, b"")
@@ -774,6 +851,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._redirect("/login")
             else:
                 self._send(200, _chat_page(m, cfg).encode())
+        elif path == "/admin/add":
+            if not self._auth_admin():
+                self._redirect("/chat")
+            else:
+                self._send(200, _admin_add_page(cfg).encode())
         elif path == "/logout":
             self._redirect("/login")
         elif path.startswith("/owner"):
@@ -798,6 +880,11 @@ class Handler(BaseHTTPRequestHandler):
             self._post_register(cfg, data)
         elif path == "/api/chat":
             self._post_chat(data)
+        elif path == "/admin/add":
+            if not self._auth_admin():
+                self._redirect("/chat")
+            else:
+                self._post_admin_add(cfg, data)
         elif path == "/owner/login":
             self._post_owner_login(cfg, data)
         elif path.startswith("/owner"):
@@ -877,6 +964,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "username": m["username"],
                          "display_name": m.get("display_name"),
+                         "role": m.get("role", "member"),
                          "status": member_status(m),
                          "expires_at": m.get("expires_at"),
                          "pay_link": _pay_tg_link(load_config(), m)})
@@ -936,6 +1024,30 @@ class Handler(BaseHTTPRequestHandler):
         m = load_member(username)
         self._send(200, _register_page(
             cfg, msg=f"Berhasil daftar, {username}.", m=m).encode())
+
+    def _post_admin_add(self, cfg, data):
+        """Halaman admin (reseller): tambah member langsung aktif."""
+        username = str(data.get("username") or "").strip()
+        display = str(data.get("display_name") or "").strip()
+        password = str(data.get("password") or "")
+        days = str(data.get("days") or "").strip()
+        if len(username) < 3 or len(password) < 4:
+            self._send(200, _admin_add_page(cfg, err="username min 3, password min 4").encode())
+            return
+        if load_member(username):
+            self._send(200, _admin_add_page(cfg, err="username sudah dipakai").encode())
+            return
+        try:
+            days_i = int(days) if days else None
+        except ValueError:
+            days_i = None
+        add_member_active(username, password, display, days=days_i,
+                          role="member", by=self.client_address[0])
+        from denzbot import tg_notify
+        tg_notify(f"➕ MEMBER BARU via admin web: {username} ({display})")
+        m = load_member(username)
+        self._send(200, _admin_add_page(
+            cfg, msg=f"✅ Member {username} aktif s/d {m.get('expires_at')}.").encode())
 
     def _post_chat(self, data):
         m, _ = self._auth_member()
@@ -1023,6 +1135,12 @@ class Handler(BaseHTTPRequestHandler):
                 m["expires_at"] = (base + timedelta(days=days)).isoformat(timespec="seconds")
                 m["status"] = "active"
                 log_activity("extend", f"{username} +{days} hari")
+            elif action == "makeadmin":
+                m["role"] = "admin"
+                log_activity("addadmin", username)
+            elif action == "demote":
+                m["role"] = "member"
+                log_activity("rmadmin", username)
             save_member(m)
             write_session_md(m)
             from denzbot import tg_notify

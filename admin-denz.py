@@ -11,7 +11,13 @@ Menu:
   7) Lihat log registrasi
   8) Setup config (token TG, harga, owner pass)
   9) Test notifikasi TG
-  10) Restart server / bot
+  A) Add member langsung (aktif)
+  D) Naikkan/turunkan admin (reseller)
+  R) Restart server / bot
+
+CLI:
+  python3 admin-denz.py add <user> <pass> [hari]
+  python3 admin-denz.py addadmin <user> | rmadmin <user>
 """
 
 import getpass
@@ -88,10 +94,11 @@ def _list_members():
     if not members:
         print("  Belum ada member.")
         return
-    print(f"  {'username':<16} {'status':<9} {'display':<14} aktif s/d")
-    print("  " + "-" * 56)
+    print(f"  {'username':<16} {'role':<7} {'status':<9} {'display':<14} aktif s/d")
+    print("  " + "-" * 60)
     for m in sorted(members, key=lambda x: x.get("username", "")):
-        print(f"  {m.get('username',''):<16} "
+        role = "ADMIN" if webdenz.is_admin(m) else "member"
+        print(f"  {m.get('username',''):<16} {role:<7} "
               f"{webdenz.member_status(m):<9} "
               f"{str(m.get('display_name',''))[:14]:<14} "
               f"{(m.get('expires_at') or '-')[:10]}")
@@ -109,6 +116,7 @@ def _detail(username):
     print(json.dumps(
         {k: v for k, v in m.items() if k != "messages"},
         ensure_ascii=False, indent=2, default=str))
+    print(f"  Role             : {m.get('role') or 'member'}")
     print(f"  Password (decrypt): {pw}")
     print(f"  Sesi md file      : {webdenz.session_md_path(username)}")
 
@@ -142,6 +150,37 @@ def _set_status(username, status, days=None):
     denzbot.tg_notify(f"🛠 {username} → {webdenz.member_status(m)} (admin-denz)")
 
 
+def _add_member(username, password, days=None):
+    """Tambah member langsung aktif (owner & admin = reseller)."""
+    username = (username or "").strip()
+    password = password or ""
+    if not username or not password:
+        print("  Pakai: add <username> <password> [hari]")
+        return
+    if len(username) < 3 or len(password) < 4:
+        print("  ✖ username min 3, password min 4 karakter.")
+        return
+    if webdenz.load_member(username):
+        print(f"  ✖ Member sudah ada: {username}")
+        return
+    m = webdenz.add_member_active(username, password, days=days,
+                                  role="member", by="admin-denz")
+    print(f"  ✅ {username} AKTIF s/d {m.get('expires_at')}")
+    denzbot.tg_notify(f"➕ Member baru (admin-denz): {username}")
+
+
+def _set_admin(username, admin=True):
+    username = (username or "").strip()
+    m = webdenz.load_member(username)
+    if not m:
+        print(f"  ✖ Member tidak ada: {username}")
+        return
+    m["role"] = "admin" if admin else "member"
+    webdenz.save_member(m)
+    webdenz.log_activity("addadmin" if admin else "rmadmin", username)
+    print(f"  ✅ {username} → {'ADMIN (reseller)' if admin else 'member biasa'}")
+
+
 def _logs(n=12):
     rows = webdenz.read_log("register", n)
     print("\n".join(f"  {r}" for r in rows) if rows else "  (kosong)")
@@ -172,6 +211,9 @@ def _setup():
     days = ask("Durasi (hari)", str(cfg.get("sub_days", 30)))
     cfg["price_idr"] = int(price)
     cfg["sub_days"] = int(days)
+    qr_url = ask("Link QR pembayaran (catbox/hosting, kosong=file lokal)",
+                 cfg.get("qr_url", ""))
+    cfg["qr_url"] = qr_url
     webdenz.save_config(cfg)
     print(f"  ✅ Config tersimpan: {webdenz.CONFIG_PATH}")
     if tok and chat:
@@ -320,10 +362,12 @@ def _menu():
   [2] Detail member          [7] Log registrasi
   [3] Activate member        [8] Setup config
   [4] Ban member             [9] Test notifikasi TG
-  [5] Unban member           [R] Restart server/bot
-                             [P] Ganti password lisensi
-                             [T] Start tunnel     [U] URL tunnel
-                             [Q] Keluar
+  [5] Unban member           [A] Add member langsung
+                            [D] Naikkan/turunkan admin
+                            [R] Restart server/bot
+                            [P] Ganti password lisensi
+                            [T] Start tunnel     [U] URL tunnel
+                            [Q] Keluar
   """)
     c = input("  > ").strip().lower()
     if c == "1":
@@ -346,6 +390,14 @@ def _menu():
         _setup()
     elif c == "9":
         _test_tg()
+    elif c == "a":
+        _add_member(input("  username: ").strip(),
+                    input("  password: ").strip(),
+                    input("  hari (kosong=default): ").strip() or None)
+    elif c == "d":
+        _set_admin(input("  username: ").strip(),
+                   admin=input("  jadikan admin? (y/n): ").strip().lower()
+                   == "y")
     elif c == "p":
         lic.setpass()
     elif c == "t":
@@ -386,6 +438,15 @@ def main():
             _setup()
         elif arg == "list":
             _list_members()
+        elif arg == "add":
+            u = sys.argv[2] if len(sys.argv) > 2 else ""
+            p = sys.argv[3] if len(sys.argv) > 3 else ""
+            d = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4].isdigit() else None
+            _add_member(u, p, d)
+        elif arg == "addadmin":
+            _set_admin(sys.argv[2] if len(sys.argv) > 2 else "", True)
+        elif arg == "rmadmin":
+            _set_admin(sys.argv[2] if len(sys.argv) > 2 else "", False)
         elif arg == "status":
             _status()
         elif arg == "start-bot":

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """denzbot — bot Telegram untuk webdenz (member & admin).
 
-- Semua event (registrasi, login, ban, dsb) diteruskan ke chat owner.
+- Semua event (registrasi, request, login, ban, dsb) diteruskan ke chat owner.
 - Owner (chat id sesuai webconfig.json) bisa kontrol lewat bot:
   /start /status /members /member <user> /ban <user> /unban <user>
-  /activate <user> /extend <user> <hari> /logs /reload
+  /activate <user> /approve <user> /reject <user> /extend <user> <hari>
+  /addmember <user> <pass> [hari] /addadmin <user> /rmadmin <user> /logs
+- Admin (reseller) hanya bisa /addmember.
+- Daftar 2 metode: registrasi di web, ATAU request langsung via bot
+  (/daftar <username> <password>) → owner approve langsung dari bot.
 - Tanpa dependency eksternal: pakai Bot API via urllib (long polling).
 """
 
@@ -124,7 +128,8 @@ def _cmd_members(_cfg):
     for m in sorted(members, key=lambda x: x.get("username", "")):
         st = webdenz.member_status(m)
         exp = (m.get("expires_at") or "-")[:10]
-        lines.append(f"- {m.get('username')} [{st}] s/d {exp}")
+        role = " 👑ADMIN" if webdenz.is_admin(m) else ""
+        lines.append(f"- {m.get('username')}{role} [{st}] s/d {exp}")
     return "\n".join(lines)
 
 
@@ -137,6 +142,7 @@ def _cmd_member(_cfg, arg):
     except Exception:  # noqa: BLE001
         pw = "(gagal decrypt)"
     return (f"👤 {m.get('username')} [{webdenz.member_status(m)}]\n"
+            f"Role: {m.get('role') or 'member'}\n"
             f"Nama: {m.get('display_name')}\n"
             f"Password: {pw}\n"
             f"Aktif s/d: {m.get('expires_at') or '-'}\n"
@@ -185,6 +191,53 @@ def _cmd_set_member(action, arg, days=None):
     return f"✅ {action} {username} → {webdenz.member_status(m)}"
 
 
+def _cmd_addmember(cfg, arg):
+    """Tambah member langsung AKTIF (owner & admin)."""
+    parts = (arg or "").split()
+    if len(parts) < 2:
+        return "Pakai: /addmember <username> <password> [hari]"
+    username, password = parts[0], parts[1]
+    days = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    if len(username) < 3 or len(password) < 4:
+        return "✖ username min 3 karakter, password min 4 karakter."
+    if webdenz.load_member(username):
+        return f"✖ username {username} sudah dipakai."
+    m = webdenz.add_member_active(username, password, days=days,
+                                  role="member", by="bot")
+    webdenz.log_activity("add", f"{username} via bot")
+    tg_notify(f"➕ MEMBER BARU via bot: {username}\n"
+              f"Langganan s/d: {m.get('expires_at')}")
+    return (f"✅ Member {username} AKTIF s/d {m.get('expires_at')}.\n"
+            f"Login pakai username: {username} / password: {password}")
+
+
+def _cmd_set_role(cfg, arg, admin=True):
+    username = (arg or "").strip()
+    m = webdenz.load_member(username)
+    if not m:
+        return f"✖ Member tidak ada: {username}"
+    m["role"] = "admin" if admin else "member"
+    webdenz.save_member(m)
+    webdenz.log_activity("addadmin" if admin else "rmadmin", username)
+    if admin and m.get("tg_chat_id"):
+        tg_send(m["tg_chat_id"],
+                "👑 Kamu sekarang ADMIN (reseller)! Bisa /addmember "
+                "<username> <password> untuk menambah member baru.")
+    return f"✅ {username} sekarang {'ADMIN (reseller)' if admin else 'member biasa'}."
+
+
+def _cmd_reject(cfg, arg):
+    username = (arg or "").strip()
+    m = webdenz.load_member(username)
+    if not m:
+        return f"✖ Member tidak ada: {username}"
+    if webdenz.member_status(m) != "pending":
+        return f"✖ {username} bukan pending (sekarang: {webdenz.member_status(m)})."
+    webdenz.delete_member(username)
+    webdenz.log_activity("reject", username)
+    return f"🗑 Request {username} ditolak & dihapus."
+
+
 _HANDLERS = {
     "/status": _cmd_status,
     "/members": _cmd_members,
@@ -193,6 +246,11 @@ _HANDLERS = {
     "/ban": lambda c, a: _cmd_set_member("ban", a),
     "/unban": lambda c, a: _cmd_set_member("unban", a),
     "/activate": lambda c, a: _cmd_set_member("activate", a),
+    "/approve": lambda c, a: _cmd_set_member("activate", a),
+    "/reject": _cmd_reject,
+    "/addmember": _cmd_addmember,
+    "/addadmin": lambda c, a: _cmd_set_role(c, a, True),
+    "/rmadmin": lambda c, a: _cmd_set_role(c, a, False),
 }
 
 
@@ -232,7 +290,7 @@ def _save_tg(chat_id):
 
 
 def _send_qr(m, chat_id):
-    """Kirim foto QR pembayaran + panduan ke chat member."""
+    """Kirim QR pembayaran + panduan ke chat member (via URL atau file)."""
     cfg = webdenz.load_config()
     qr = webdenz._qr_source(cfg)
     if not qr:
@@ -244,6 +302,14 @@ def _send_qr(m, chat_id):
                f"• Transfer ke QR di atas, lalu kirim bukti ke bot ini.\n"
                f"• Setelah dikonfirmasi owner, akun otomatis aktif.\n"
                f"username: {m.get('username')}")
+    if qr.startswith(("http://", "https://")):
+        # Telegram sendPhoto menerima URL gambar langsung.
+        r = tg_api(cfg.get("tg_bot_token"), "sendPhoto",
+                   {"chat_id": chat_id, "photo": qr, "caption": caption})
+        if r.get("ok"):
+            return ("✅ QR pembayaran terkirim. Setelah transfer, "
+                    "kirim foto bukti ke bot ini, ya.")
+        return "Gagal kirim QR: " + str(r.get("description"))[:120]
     r = tg_send_photo(chat_id, qr, caption)
     if r.get("ok"):
         return ("✅ QR pembayaran terkirim. Setelah transfer, "
@@ -296,6 +362,81 @@ def handle_member_message(chat_id, text="", has_photo=False, caption=""):
     return _send_qr(m, chat_id)
 
 
+_ADMIN_HELP = ("👑 Panel ADMIN (reseller)\n"
+               "Kamu bisa menambahkan member baru:\n"
+               "/addmember <username> <password> [hari]\n\n"
+               "Contoh: /addmember budi rahasia123\n\n"
+               "Perintah lain (ban/extend/approve, dsb) khusus owner.")
+
+
+def handle_admin_message(chat_id, text=""):
+    """Pesan dari admin (reseller) — hanya boleh menambah member."""
+    cfg = webdenz.load_config()
+    parts = (text or "").split()
+    cmd = parts[0].split("@")[0].lower() if parts else ""
+    arg = " ".join(parts[1:])
+    if cmd in ("/start", "/help"):
+        return _ADMIN_HELP
+    if cmd == "/addmember":
+        return _cmd_addmember(cfg, arg)
+    if cmd in ("/status", "/members", "/member", "/logs", "/ban", "/unban",
+               "/activate", "/approve", "/extend", "/addadmin", "/rmadmin",
+               "/reject"):
+        return "⛔ Perintah itu khusus owner. Sebagai admin kamu cuma bisa /addmember."
+    return _ADMIN_HELP
+
+
+def handle_stranger(chat_id, text="", has_photo=False):
+    """Calon member yang belum punya akun — bisa request daftar dari bot."""
+    cfg = webdenz.load_config()
+    parts = (text or "").split()
+    cmd = parts[0].split("@")[0].lower() if parts else ""
+    if cmd == "/start":
+        return ("Halo! Ini bot langganan denzyx AI 🤖\n\n"
+                "Daftar langsung dari sini:\n"
+                "/daftar <username> <password>\n"
+                "Contoh: /daftar budi rahasia123\n\n"
+                "Setelah kamu daftar, owner mengonfirmasi, dan akun kamu aktif. "
+                "Sudah punya akun? Kirim username kamu untuk dapat QR pembayaran.")
+    if cmd == "/daftar":
+        args = parts[1:]
+        if len(args) < 2:
+            return ("Pakai: /daftar <username> <password>\n"
+                    "Contoh: /daftar budi rahasia123")
+        username, password = args[0], args[1]
+        if len(username) < 3 or len(password) < 4:
+            return "✖ username min 3 karakter, password min 4 karakter."
+        if webdenz.load_member(username):
+            return f"✖ username {username} sudah dipakai."
+        m = webdenz.create_member(username, password, username, ip="")
+        m["tg_chat_id"] = str(chat_id)
+        webdenz.save_member(m)
+        webdenz.log_activity("request", username)
+        tg_notify(f"🙋 REQUEST BARU via bot: {username}\n"
+                  f"Chat id: {chat_id}\n"
+                  f"Approve: /approve {username}\n"
+                  f"Tolak: /reject {username}")
+        return (f"📝 Request kamu diterima, {username}!\n"
+                f"Owner akan mengonfirmasi sebentar lagi. "
+                f"Begitu aktif, kamu dapat notifikasi di sini ✅")
+    if has_photo:
+        return ("Halo! Kalau mau langganan, daftar dulu:\n"
+                "/daftar <username> <password>\n"
+                "Contoh: /daftar budi rahasia123")
+    # coba kenali akun lama via username ("username: x" / "@x")
+    uname = _extract_username(text)
+    if uname:
+        m = webdenz.load_member(uname)
+        if m:
+            m["tg_chat_id"] = str(chat_id)
+            webdenz.save_member(m)
+            return handle_member_message(chat_id, text, has_photo)
+    return ("Halo! Untuk daftar langsung dari bot:\n"
+            "/daftar <username> <password>\n"
+            "Contoh: /daftar budi rahasia123\n\n"
+            "Sudah punya akun? Kirim username kamu untuk dapat QR pembayaran.")
+
+
 def handle_message(text):
     cfg = webdenz.load_config()
     parts = (text or "").split()
@@ -311,8 +452,10 @@ def handle_message(text):
     fn = _HANDLERS.get(cmd)
     if not fn:
         return ("Perintah owner: /status /members /member <user> /logs "
-                "/activate <user> /ban <user> /unban <user> "
-                "/extend <user> <hari>")
+                "/activate <user> /approve <user> /reject <user> "
+                "/ban <user> /unban <user> /extend <user> <hari> "
+                "/addmember <user> <pass> [hari] "
+                "/addadmin <user> /rmadmin <user>")
     try:
         if arg:
             return fn(cfg, arg)
@@ -363,22 +506,30 @@ def run_bot(stop_evt=None, verbose=True):
             has_photo = bool(msg.get("photo"))
             caption = msg.get("caption") or ""
             if chat_id == owner_id:
-                if not text and has_photo:
-                    continue
                 if not text:
                     continue
                 reply = handle_message(text)
                 tg_send(owner_id, reply)
                 continue
-            # --- alur member / pembeli ---
-            reply = handle_member_message(chat_id, text, has_photo, caption)
+            # --- member / admin (reseller) / calon member ---
+            sender = _member_tg(chat_id)
+            if sender and webdenz.is_admin(sender):
+                reply = handle_admin_message(chat_id, text)
+                tg_send(chat_id, reply)
+                continue
+            if sender:
+                reply = handle_member_message(chat_id, text, has_photo, caption)
+                tg_send(chat_id, reply)
+                if has_photo:
+                    # forward foto bukti ke owner
+                    photo = msg["photo"][-1]["file_id"]
+                    tg_api(cfg.get("tg_bot_token"), "sendPhoto",
+                           {"chat_id": owner_id, "photo": photo,
+                            "caption": f"🧾 Bukti pembayaran dari {sender.get('username')}"})
+                continue
+            # calon member (belum punya akun) → alur request daftar
+            reply = handle_stranger(chat_id, text, has_photo)
             tg_send(chat_id, reply)
-            if has_photo:
-                # forward foto bukti ke owner
-                photo = msg["photo"][-1]["file_id"]
-                tg_api(cfg.get("tg_bot_token"), "sendPhoto",
-                       {"chat_id": owner_id, "photo": photo,
-                        "caption": f"🧾 Bukti pembayaran dari {_extract_username(text or caption) or chat_id}"})
 
 
 if __name__ == "__main__":
