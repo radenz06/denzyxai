@@ -442,13 +442,15 @@ def _transcribe_whisper(wav, model_size, lang):
 
 
 def _listen_termux(lang="id-ID", timeout=25):
-    """STT Android (termux-speech-to-text) — fallback."""
+    """STT Android (termux-speech-to-text) — fallback.
+
+    Catatan: `termux-speech-to-text` TIDAK punya opsi bahasa (`-l`/`--lang`
+    bikin "illegal option"). Bahasa diatur dari pengaturan Android/API —
+    jadi panggil tanpa argumen tambahan."""
     exe = _which("termux-speech-to-text")
     if not exe:
         return None, "STT tidak tersedia — pkg install termux-api"
     argv = [exe]
-    if lang:
-        argv += ["-l", lang]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout)
