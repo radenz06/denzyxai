@@ -1,6 +1,7 @@
-# denzyz AI
+# denzyx AI
 
-AI agent buat Termux yang jalan di terminal. Punya menu interaktif (TUI),
+AI agent buat Termux yang jalan di terminal — plus **web member area**,
+**bot Telegram**, dan **lisensi berpassword**. Punya menu interaktif (TUI),
 akses langsung ke perangkat Android, bisa bales notifikasi sendiri 24 jam,
 dan cukup lengkap buat bikin aplikasi — dari Python sampe Android APK.
 
@@ -36,6 +37,19 @@ tapi serius kalau disuruh kerja.
   build, debug, logs, pkg, scaffold, tree, sdk (Android), plus akses
   ekstra: ssh, download, serve (HTTP server), bg (job background),
   root (su), media, screenshot, dan sys.
+- **Web member area** (`webdenz.py`) — registrasi + login member,
+  chat AI dari browser, status langganan. Langganan dibayar via **QR**
+  (dari `/storage/emulated/0/qr.jpg`), setelah regist langsung muncul QR
+  + tombol konfirmasi ke owner di Telegram. Auto-connect internet
+  lewat **cloudflared** (link baru tiap run, dijamin selalu bisa diakses).
+- **Owner panel** (`admin-denz.py`) — kelola member (activate/ban/extend),
+  lihat log registrasi, setup config, restart server/bot/tunnel, dan
+  ganti password lisensi.
+- **Bot Telegram** (`denzbot.py`) — notifikasi registrasi & login member,
+  kirim QR, dan aktivasi ke owner.
+- **Lisensi berpassword** (`lic.py`) — project **nggak bisa dijalankan
+  tanpa password lisensi**. Password ter-hash (PBKDF2), nggak pernah
+  disimpan plaintext. Owner ganti lewat `python3 admin-denz.py setpass`.
 - **Voice chat** (`voice-denz.py`) — panggilan suara **adaptif**: AI
   ikut ritme & mood bicaramu, bisa ganti suara saat disuruh (cowok/
   cewek/anak kecil), dan dengar walau sedang ngomong (barge-in).
@@ -52,35 +66,82 @@ tapi serius kalau disuruh kerja.
 ## Install
 
 ```sh
-git clone https://github.com/radenz06/denzyz.git
-cd denzyz
+git clone https://github.com/radenz06/denzyxai.git
+cd denzyxai
 ./install.sh
 ```
 
 Atau tanpa clone, cukup pastikan folder berisi `denzyx.py`, terus:
 
 ```sh
-./denzyx          # masuk ke TUI
+./denzyx          # masuk ke TUI (minta password lisensi)
 ./denzyx --help   # opsi baris perintah
 ```
 
+> **Lisensi:** pertama kali jalan, terminal bakal minta **password
+> lisensi**. Tanpa password yang benar, program nggak mau jalan.
+> Password default dibagikan owner saat beli lisensi — segera ganti
+> dengan `python3 admin-denz.py setpass` (butuh password lama + terminal
+> interaktif). Setelah password benar sekali, mesin ini otomatis dapat
+> token lokal (`webdata/.lic_ok`, gitignored) buat daemon/restart tanpa
+> prompt. Ganti password = token lama otomatis tidak berlaku.
+
 Dependency utama: `python3` dan `curses` (bawaan). Untuk fitur perangkat
 butuh package `termux-api`. Untuk auto-daemon butuh `termux-api` juga
-(biar `termux-notification-list` bisa baca notifikasi).
+(biar `termux-notification-list` bisa baca notifikasi). Untuk web/tunnel
+butuh `python3` + `cloudflared` + `cryptography`.
 
 ## Pakai
 
 | Aksi | Cara |
 |---|---|
-| Buka app | `./denzyx` (atau `denzyx` kalau sudah di-`install.sh`) |
+| Buka app | `./denzyx` (minta password lisensi dulu) |
 | Shortcut instan | Ctrl+Alt+D (lewat `.bashrc` + `.blerc`) |
 | Voice chat | menu "Voice Chat" atau `./denzyx --voice` |
+| Web member (auto-link) | `./denzyx` → otomatis start web+bot+tunnel; link muncul di terminal |
+| Registrasi web | buka link tunnel lalu `/register` |
+| Owner panel | `python3 admin-denz.py` (atau `./denzyx` lalu pilih Owner Panel) |
+| Ganti password lisensi | `python3 admin-denz.py setpass` |
 | Pindah menu | ↑/↓, j/k |
 | Pilih / kirim | Enter |
 | Kembali / batal | ESC |
 | Keluar | Ctrl-C |
 | Auto-reply 24 jam | `python3 auto-denz.py install` lalu `status` |
 | Cek status SDK Android | tool `sdk` di dalam chat |
+
+## Web member area
+
+Jalan bareng AI — pas `./denzyx` dilaunch, server web + bot + tunnel
+cloudflared otomatis start (kecuali `--noweb`).
+
+1. **Auto-link** — tunnel cloudflared bikin link publik baru (mis.
+   `https://xxxx.trycloudflare.com`). Link + status tercetak di terminal.
+2. **Registrasi** — user buka `/register`, isi username/password, terus
+   bayar. Setelah regist langsung tampil **QR pembayaran** di atas
+   (dari `/storage/emulated/0/qr.jpg`) + tombol **"Konfirmasi Aktivasi
+   ke Telegram"** yang blank ke DM owner (`t.me/colipopi`).
+3. **Aktivasi** — owner aktifkan dari owner panel (`admin-denz.py` menu
+   `3. Activate member`) atau via bot. Status member: `pending` →
+   `active` (masa aktif sesuai `sub_days`) → `expired` → `banned`.
+4. **Chat** — member login dan ngobrol dengan AI langsung dari browser
+   (`/chat`), cek status langganan di `/status`.
+
+Punya frontend terpisah buat deploy di Vercel (`web-frontend/`) yang
+nembak API JSON (`/api/register`, `/api/login`, `/api/chat`, `/api/status`,
+`/api/me`).
+
+### Admin CLI (`admin-denz.py`)
+
+```sh
+python3 admin-denz.py            # menu interaktif (status, member, setup, dsb)
+python3 admin-denz.py setpass    # ganti password lisensi
+python3 admin-denz.py ensure     # pastikan server+bot+tunnel jalan
+python3 admin-denz.py restart    # restart semua
+python3 admin-denz.py start-bot  # / stop-bot / start-server / stop-server
+python3 admin-denz.py start-tunnel  # / stop-tunnel / url
+python3 admin-denz.py list       # daftar member
+python3 admin-denz.py status     # status server/bot/tunnel/member
+```
 
 ## Voice chat
 
@@ -127,9 +188,14 @@ Semua lewat file atau env var, nggak perlu edit kode:
   request.
 - **`theme.md`** — warna TUI. Format `nama = fg,bg` (0–255, `-1` = default
   terminal). Hapus/rename file buat balik ke default.
+- **`webconfig.json`** (gitignored) — token bot TG, chat id owner,
+  username owner, harga langganan, masa aktif, `qr_path`, secret.
+  Contoh kosong ada di `config.example.json`.
 - **Env var auto-daemon** (`DENZYX_AUTO_*`) — interval, balas AI on/off,
   TTS, vibrate, ambang baterai, app yang di-ignore, TTL dedupe. Lihat
   `.env.example`.
+- **Env var lisensi** — `DENZYX_PASS` (password lisensi sekali pakai buat
+  non-interaktif) dan `DENZYX_LIC=ok` (sudah terverifikasi sesi ini).
 
 ## Tool
 
@@ -178,13 +244,19 @@ konfirmasi di TUI kecuali `auto_allow` aktif.
 ## Struktur
 
 ```text
-denzyz/
-├── denzyx.py          # app utama (TUI curses + loop tool calling)
+denzyxai/
+├── denzyx.py          # app utama (TUI curses + loop tool calling + auto web)
 ├── dscli.py           # library tool-calling (schema + implementasi)
+├── webdenz.py         # web member area (registrasi, login, chat, status)
+├── admin-denz.py      # owner panel CLI + restart server/bot/tunnel
+├── denzbot.py         # bot Telegram (notifikasi, QR, aktivasi)
 ├── auto-denz.py       # daemon 24 jam (notifikasi, auto-reply, baterai)
 ├── voice-denz.py      # panggilan suara (STT + TTS via termux-api)
+├── lic.py             # gerbang lisensi password (PBKDF2 hash)
 ├── system_prompt.md   # persona & aturan AI
 ├── theme.md           # warna TUI
+├── config.example.json# contoh config web (nilai asli di webconfig.json)
+├── web-frontend/      # frontend Vercel (deploy terpisah)
 ├── denzyx             # launcher (resolver folder + python path)
 ├── install.sh         # setup sekali jalan
 ├── scripts/           # helper (backup, dll)
@@ -192,14 +264,25 @@ denzyz/
 └── sessions/          # riwayat sesi (gitignored)
 ```
 
+File sensitif (`webconfig.json`, `webdata/`, `sessions/`, `.env`,
+`.denzyx/`) otomatis di-gitignore — nggak ikut ke GitHub.
+
 ## Troubleshooting
 
+- **"Project terkunci: butuh password lisensi"** — masukkan password
+  lisensi yang benar. Lupa? Minta reset ke owner. Setelah benar sekali,
+  token lokal dibuat (`webdata/.lic_ok`) biar daemon/restart nggak nanya
+  lagi. Owner: `python3 admin-denz.py setpass`.
 - **`termux-notification-list` kosong / butuh izin** — Settings → Apps →
   Special access → Notification access → aktifkan Termux:API.
 - **Tool device error "permission"** — grant izin lewat dialog layar yang
   muncul sekali.
 - **Daemon mati** — `python3 auto-denz.py status`; job scheduler (ID 745)
   auto-restart tiap 15 menit, plus boot script di `.termux/boot/`.
+- **Web nggak kebuka dari HP lain** — pastikan tunnel jalan
+  (`python3 admin-denz.py status`); kalau mati, `python3 admin-denz.py start-tunnel`.
+- **QR pembayaran nggak muncul** — cek file QR ada di
+  `/storage/emulated/0/qr.jpg` (bisa juga `/sdcard/qr.jpg`).
 - **Tema rusak** — hapus `theme.md`, balik ke default.
 
 ## Lisensi
