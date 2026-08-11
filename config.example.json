@@ -15,5 +15,12 @@
   "qr_path": "",
   "host": "0.0.0.0",
   "port": 8000,
+  "ssl_cert": "",
+  "ssl_key": "",
+  "rate_max_attempts": 8,
+  "rate_window_sec": 600,
+  "chat_rate_max": 30,
+  "chat_rate_window": 60,
+  "owner_per_page": 50,
   "ai": {"model": "Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==", "max_tokens": 1024}
 }

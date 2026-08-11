@@ -222,20 +222,45 @@ class TestHTTP:
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read().decode()
 
+    def _cookie_val(self, setcookie, name):
+        for part in str(setcookie).split(","):
+            part = part.strip()
+            if part.startswith(name + "="):
+                return part.split("=")[1].split(";")[0]
+        return ""
+
+    def _csrf_from(self, body):
+        import re
+        mt = re.search(r'name="_csrf" value="([^"]+)"', body)
+        return mt.group(1) if mt else None
+
+    def _csrf(self, port, path, cookie=""):
+        """GET halaman, ambil pasangan (cookie denz_csrf, token _csrf)."""
+        import webdenz
+        st, h, body = self._get(port, path, cookie)
+        assert st == 200
+        raw = self._cookie_val(h.get("Set-Cookie", ""), "denz_csrf")
+        tok = self._csrf_from(body)
+        assert raw and tok
+        joined = (cookie + "; " if cookie else "") + f"denz_csrf={raw}"
+        return joined, tok
+
     def test_register_login_chat(self, wd, monkeypatch):
         import webdenz
         _mock_stream_chat(wd, monkeypatch)
         srv, t = self._start(wd)
         port = srv.server_address[1]
         try:
+            cookie, tok = self._csrf(port, "/register")
             # register
             st, h, body = self._post(port, "/register",
                                      {"username": "newbie", "display_name": "Newbie",
-                                      "password": "pw123"})
+                                      "password": "pw123", "_csrf": tok}, cookie)
             assert st == 200 and "pending" in body
             # login sebelum aktif → ditolak
             st, h, body = self._post(port, "/login",
-                                     {"username": "newbie", "password": "pw123"})
+                                     {"username": "newbie", "password": "pw123",
+                                      "_csrf": tok}, cookie)
             assert "pending" in body
             # activate
             m = webdenz.load_member("newbie")
@@ -244,25 +269,35 @@ class TestHTTP:
             m["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
             webdenz.save_member(m)
             # login sukses → redirect + cookie
+            cookie, tok = self._csrf(port, "/login")
             st, h, body = self._post(port, "/login",
-                                     {"username": "newbie", "password": "pw123"})
+                                     {"username": "newbie", "password": "pw123",
+                                      "_csrf": tok}, cookie)
             assert st in (302, 303)
-            cookie = h.get("Set-Cookie", "")
-            assert "denz_member=" in cookie
-            tok = cookie.split("denz_member=")[1].split(";")[0]
+            mcookie = h.get("Set-Cookie", "")
+            assert "denz_member=" in mcookie
+            mtok = self._cookie_val(mcookie, "denz_member")
             # chat page
-            st, h, body = self._get(port, "/chat", f"denz_member={tok}")
+            st, h, body = self._get(port, "/chat", f"denz_member={mtok}")
             assert st == 200
             # api chat
             st, h, body = self._post(port, "/api/chat",
-                                     {"message": "halo"}, f"denz_member={tok}")
+                                     {"message": "halo"}, f"denz_member={mtok}")
             assert st == 200
             j = json.loads(body)
             assert j.get("reply") == "balasan AI"
             assert webdenz.load_member("newbie")["login_count"] >= 1
+            # streaming chat
+            st, h, body = self._post(port, "/api/chat/stream",
+                                     {"message": "halo stream"},
+                                     f"denz_member={mtok}")
+            assert st == 200
+            assert '"t": "text"' in body and '"t": "done"' in body
             # status page member
-            st, h, body = self._get(port, "/status", f"denz_member={tok}")
+            st, h, body = self._get(port, "/status", f"denz_member={mtok}")
             assert st == 200 and "newbie" in body
+            # security headers
+            assert "nosniff" in h.get("X-Content-Type-Options", "")
         finally:
             srv.shutdown()
             t.join(timeout=3)
@@ -273,11 +308,15 @@ class TestHTTP:
         port = srv.server_address[1]
         webdenz.create_member("citra", "pwcitra", "Citra")
         try:
+            cookie, tok = self._csrf(port, "/owner")
             # owner login
             st, h, body = self._post(port, "/owner/login",
-                                     {"username": "denzyx", "password": "ownerpw"})
+                                     {"username": "denzyx", "password": "ownerpw",
+                                      "_csrf": tok}, cookie)
             assert st in (302, 303)
-            otok = h.get("Set-Cookie", "").split("denz_owner=")[1].split(";")[0]
+            ocookie = h.get("Set-Cookie", "")
+            otok = self._cookie_val(ocookie, "denz_owner")
+            assert otok
             # owner page
             st, h, body = self._get(port, "/owner", f"denz_owner={otok}")
             assert st == 200 and "citra" in body
@@ -285,6 +324,75 @@ class TestHTTP:
             st, h, body = self._get(port, "/owner/member/citra",
                                     f"denz_owner={otok}")
             assert st == 200 and "pwcitra" in body
+            # reset password via owner
+            cookie, tok = self._csrf(port, "/owner/member/citra")
+            st, h, body = self._post(port, "/owner/member/citra",
+                                     {"action": "resetpass", "new_password": "baru456",
+                                      "_csrf": tok},
+                                     f"denz_owner={otok}; {cookie}")
+            assert st in (302, 303)
+            assert webdenz.dec_secret(webdenz.load_member("citra")["password"]) == "baru456"
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_csrf_required(self, wd):
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            st, h, body = self._post(port, "/login",
+                                     {"username": "x", "password": "y"})
+            assert st == 200 and "CSRF" in body
+            st, h, body = self._post(port, "/owner/login",
+                                     {"username": "denzyx", "password": "ownerpw"})
+            assert "CSRF" in body
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_change_password(self, wd):
+        import webdenz
+        from datetime import datetime, timedelta
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        webdenz.create_member("ganti", "lama123", "Ganti")
+        m = webdenz.load_member("ganti")
+        m["status"] = "active"
+        m["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
+        webdenz.save_member(m)
+        tok = webdenz.issue_member_session("ganti", "9.9.9.9")
+        try:
+            cookie, csrf = self._csrf(port, "/password", f"denz_member={tok}")
+            st, h, body = self._post(port, "/password",
+                                     {"old_password": "lama123",
+                                      "new_password": "baru456",
+                                      "confirm_password": "baru456",
+                                      "_csrf": csrf},
+                                     cookie)
+            assert st == 200 and "berhasil" in body.lower()
+            assert webdenz.dec_secret(webdenz.load_member("ganti")["password"]) == "baru456"
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_rate_limit_login(self, wd):
+        import webdenz
+        cfg = webdenz.load_config()
+        cfg["rate_max_attempts"] = 3
+        cfg["rate_window_sec"] = 60
+        webdenz.save_config(cfg)
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            cookie, tok = self._csrf(port, "/login")
+            msgs = []
+            for _ in range(4):
+                st, h, body = self._post(port, "/login",
+                                         {"username": "nobody", "password": "x",
+                                          "_csrf": tok}, cookie)
+                msgs.append("terlalu banyak" in body)
+            assert any(msgs), "harus ada respon rate-limit"
         finally:
             srv.shutdown()
             t.join(timeout=3)

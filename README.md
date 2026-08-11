@@ -38,10 +38,14 @@ tapi serius kalau disuruh kerja.
   ekstra: ssh, download, serve (HTTP server), bg (job background),
   root (su), media, screenshot, dan sys.
 - **Web member area** (`webdenz.py`) — registrasi + login member,
-  chat AI dari browser, status langganan. Langganan dibayar via **QR**
+  chat AI dari browser (streaming + markdown), status langganan, ganti
+  password. Langganan dibayar via **QR**
   (dari `/storage/emulated/0/qr.jpg`), setelah regist langsung muncul QR
   + tombol konfirmasi ke owner di Telegram. Auto-connect internet
   lewat **cloudflared** (link baru tiap run, dijamin selalu bisa diakses).
+  **Keamanan**: CSRF token di semua form, rate limit login/register/chat,
+  cookie `HttpOnly; SameSite=Lax` (+ `Secure` saat HTTPS), owner panel
+  dengan pencarian & pagination. HTTPS opsional via `ssl_cert`/`ssl_key`.
 - **Owner panel** (`admin-denz.py`) — kelola member (activate/ban/extend),
   lihat log registrasi, setup config, restart server/bot/tunnel, dan
   ganti password lisensi. Member dengan role **admin (reseller)** bisa

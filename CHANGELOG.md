@@ -4,6 +4,32 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.0.0] - 2026-08-11
+
+### Ditambahkan — webdenz v3 (keamanan + UX)
+- **HTTPS.** `ssl_cert`/`ssl_key` di config — bila terisi & file ada, server
+  jalan pakai TLS; cookie otomatis dapat flag `Secure`.
+- **Cookie aman.** Semua cookie (`denz_member`, `denz_owner`, `denz_csrf`)
+  sekarang `HttpOnly; SameSite=Lax` (+ `Secure` saat HTTPS).
+- **CSRF.** Setiap form POST (login, register, owner, admin/add, password,
+  logout, aksi owner) divalidasi token HMAC per-sesi yang dikirim lewat
+  cookie `denz_csrf` + field `_csrf`; tanpa token → 403.
+- **Rate limit** anti brute-force & abuse per-IP (login/registrasi/owner)
+  dan per-member (chat). Konfigurasi: `rate_max_attempts`,
+  `rate_window_sec`, `chat_rate_max`, `chat_rate_window`.
+- **Logout jadi POST** (bukan GET) + dibersihkan cookienya.
+- **Streaming chat** — `/api/chat/stream` (NDJSON chunked), jawaban AI
+  muncul per potongan + render markdown di browser.
+- **Render markdown server-side** untuk riwayat chat (aman, no XSS).
+- **Fix XSS**: semua input member (username, nama, catatan, dll) di-escape.
+- **Owner panel**: pencarian member & log + pagination (`owner_per_page`).
+- **Ganti password** member (`/password`) & reset password dari owner panel.
+- **Headers keamanan**: `X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`, `Cache-Control: no-store` untuk halaman dinamis,
+  cache 1 jam untuk `/qr`.
+- `owner_token_valid` pakai `secrets.compare_digest` (anti timing attack).
+- Favicon, meta description.
+
 ## [2.7.0] - 2026-08-07
 
 ### Ditambahkan

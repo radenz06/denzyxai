@@ -16,6 +16,7 @@ Data & rahasia disimpan di webconfig.json (gitignored) dan webdata/
 
 import base64
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -44,6 +45,9 @@ QR_CACHE = DATA_DIR / "qr_cache"
 PRICE_DEFAULT = 20000
 SUB_DAYS_DEFAULT = 30
 
+# di-set True oleh start_server() bila ssl_cert/ssl_key terpasang (untuk flag Secure cookie)
+_HTTPS = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -68,6 +72,16 @@ _DEFAULTS = {
     "qr_path": "",
     "host": "0.0.0.0",
     "port": 8000,
+    # https (isikan path cert/key; bila kosong, server tetap HTTP)
+    "ssl_cert": "",
+    "ssl_key": "",
+    # rate limit anti brute-force & abuse
+    "rate_max_attempts": 8,
+    "rate_window_sec": 600,
+    "chat_rate_max": 30,
+    "chat_rate_window": 60,
+    # pagination owner panel
+    "owner_per_page": 50,
     # model tersamar supaya tidak terbaca orang di GitHub
     "ai": {"model": _obf_decode("Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw=="),
            "max_tokens": 1024},
@@ -124,7 +138,8 @@ def verify_password(pw, salt, digest):
 
 def owner_token_valid(token):
     cfg = load_config()
-    return bool(token) and token == cfg.get("owner_token")
+    stored = cfg.get("owner_token") or ""
+    return bool(token) and bool(stored) and secrets.compare_digest(str(token), str(stored))
 
 
 def issue_owner_token():
@@ -362,16 +377,23 @@ def read_log(name, lines=200):
 # AI chat (aman: stream_chat tanpa tool)
 # ---------------------------------------------------------------------------
 
+def _chat_state(username):
+    """Buat state AI untuk member tertentu (riwayat dari member file)."""
+    import denzyx
+    m = load_member(username)
+    state = denzyx.State()
+    state.cwd = Path(BASE_DIR)
+    cfg = load_config()
+    state.model = (cfg.get("ai") or {}).get("model", denzyx.State().model)
+    state.max_tokens = (cfg.get("ai") or {}).get("max_tokens", 1024)
+    state.messages = list((m or {}).get("messages") or [])
+    return state
 def member_chat(username, prompt):
     import denzyx
     m = load_member(username)
     if not m:
         return None, "member tidak ditemukan"
-    state = denzyx.State()
-    state.cwd = Path(BASE_DIR)
-    state.model = (load_config().get("ai") or {}).get("model", denzyx.State().model)
-    state.max_tokens = (load_config().get("ai") or {}).get("max_tokens", 1024)
-    state.messages = list(m.get("messages") or [])
+    state = _chat_state(username)
     q = queue.Queue()
     t = threading.Thread(target=denzyx.stream_chat,
                          args=(state, prompt, q), daemon=True)
@@ -402,49 +424,220 @@ def member_chat(username, prompt):
 # HTTP server
 # ---------------------------------------------------------------------------
 
+_VER = "v3.0.0"
+
+
+def _cookie(name, value, max_age=None):
+    """Cookie aman: HttpOnly + SameSite=Lax, Secure bila server HTTPS."""
+    parts = f"{name}={value}; Path=/; HttpOnly; SameSite=Lax"
+    if _HTTPS:
+        parts += "; Secure"
+    if max_age is not None:
+        parts += f"; Max-Age={int(max_age)}"
+    return parts
+
+
+class _RateLimiter:
+    """Rate limit sliding window sederhana (thread-safe, in-memory)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._hits = {}
+
+    def hit(self, key, max_hits, window_sec):
+        now = time.time()
+        with self._lock:
+            dq = self._hits.setdefault(key, [])
+            while dq and now - dq[0] > window_sec:
+                dq.pop(0)
+            if len(dq) >= max_hits:
+                return False
+            dq.append(now)
+            return True
+
+
+_RL = _RateLimiter()
+
 _CSS = """
-body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;
-max-width:760px;margin:0 auto;padding:16px}a{color:#6ea8fe}
-.card{background:#171a21;border:1px solid #262b36;border-radius:12px;
-padding:18px;margin:14px 0}
-input,textarea,select,button{background:#0f1115;color:#e6e6e6;
-border:1px solid #333;border-radius:8px;padding:10px;font-size:15px;
-width:100%;box-sizing:border-box;margin:6px 0}
-button{background:#2b6bff;border:none;cursor:pointer;font-weight:600}
-button.danger{background:#b3261e}button.ok{background:#188038}
-.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px}
-.pending{background:#8a6d00}.active{background:#188038}.banned{background:#b3261e}
-.expired{background:#555}.none{background:#333}
-pre{white-space:pre-wrap;background:#0d0f14;padding:10px;border-radius:8px}
-.msg{white-space:pre-wrap;margin:8px 0;padding:10px;border-radius:10px}
-.user{background:#1b2a4a;text-align:right}.ai{background:#1d232b}
-.toolbar a{margin-right:12px;text-decoration:none}
-small{color:#8a8f98}table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:6px;border-bottom:1px solid #262b36}
-.paycard{background:#123;border:1px solid #2b6bff;border-radius:12px;
-padding:16px;margin:14px 0;text-align:center}
-a.paybtn{display:inline-block;background:#2b6bff;color:#fff;padding:12px 18px;
-border-radius:10px;text-decoration:none;font-weight:700;font-size:16px}
+:root{--bg:#0a0e1a;--card:rgba(21,27,44,.75);--card2:#1a2138;--line:#283149;
+--txt:#e9edf7;--mut:#8b95ad;--acc:#4f7cff;--acc2:#8b5cf6;--ok:#22c55e;--err:#ef4444}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--txt);
+background:radial-gradient(1200px 800px at 15% -10%,#1c2650 0%,transparent 55%),
+radial-gradient(1000px 700px at 110% 110%,#33175e 0%,transparent 55%),
+radial-gradient(700px 500px at 80% -20%,#0f2a4a 0%,transparent 60%),#0a0e1a;
+background-attachment:fixed;min-height:100vh;padding:80px 16px 48px;line-height:1.5}
+a{color:#7aa2ff;text-decoration:none}a:hover{color:#a5c0ff}
+small{color:var(--mut)}
+/* app bar */
+.appbar{position:fixed;top:0;left:0;right:0;z-index:50;display:flex;align-items:center;gap:12px;
+padding:10px 16px;background:rgba(13,17,31,.78);backdrop-filter:blur(16px) saturate(1.4);
+border-bottom:1px solid var(--line)}
+.burger{background:none;border:1px solid var(--line);border-radius:12px;color:var(--txt);
+font-size:22px;line-height:1;width:44px;height:44px;margin:0;padding:0;cursor:pointer;
+transition:transform .25s,background .2s;flex:none}
+.burger:hover{background:var(--card2);transform:rotate(90deg)}
+.appbar-title{display:flex;flex-direction:column;line-height:1.15;min-width:0}
+.appbar-title b{font-size:17px;letter-spacing:.3px;
+background:linear-gradient(90deg,#7aa2ff,#b79aff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.appbar-title small{color:var(--mut);font-size:12px}
+.appbar .spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ok);
+border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.1);padding:5px 10px;border-radius:20px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:blink 1.6s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+/* drawer */
+.drawer-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;opacity:0;
+pointer-events:none;transition:opacity .25s}
+.drawer-backdrop.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;left:0;bottom:0;width:274px;z-index:70;
+background:linear-gradient(180deg,#141a30,#0e1226);border-right:1px solid var(--line);
+transform:translateX(-106%);transition:transform .3s cubic-bezier(.2,.8,.2,1);
+padding:16px;overflow-y:auto;box-shadow:0 0 50px rgba(0,0,0,.55)}
+.drawer.on{transform:none}
+.drawer-head{margin-bottom:8px;padding:4px 4px 12px;border-bottom:1px solid var(--line)}
+.drawer-head b{font-size:19px;background:linear-gradient(90deg,#7aa2ff,#b79aff);
+-webkit-background-clip:text;background-clip:text;color:transparent}
+.drawer-head small{color:var(--mut);font-size:12px}
+.drawer a{display:flex;align-items:center;gap:12px;color:var(--txt);padding:12px;border-radius:12px;
+margin:3px 0;font-size:14.5px;transition:background .15s,transform .15s}
+.drawer a:hover{background:var(--card2);transform:translateX(5px)}
+.drawer .drawer-logout{margin-top:18px;padding-top:12px;border-top:1px solid var(--line)}
+.drawer .dlogout{background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff;padding:12px;
+border-radius:12px;font-size:14.5px;margin:0}
+.drawer .group{margin:16px 4px 4px;font-size:11px;letter-spacing:1.4px;color:var(--mut);text-transform:uppercase}
+.drawer .foot{margin-top:20px;padding-top:12px;border-top:1px solid var(--line);color:var(--mut);font-size:12px}
+/* cards */
+.card{background:var(--card);backdrop-filter:blur(10px);border:1px solid var(--line);
+border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 12px 34px rgba(0,0,0,.28);
+animation:cardIn .45s cubic-bezier(.2,.8,.2,1)}
+@keyframes cardIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+/* inputs & buttons */
+label{display:block;font-size:13px;color:var(--mut);margin:12px 0 4px}
+input,textarea,select{background:#0d1120;color:var(--txt);border:1px solid var(--line);
+border-radius:12px;padding:12px;font-size:15px;width:100%;box-sizing:border-box;margin:0 0 6px;
+transition:border .2s,box-shadow .2s}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc);
+box-shadow:0 0 0 3px rgba(79,124,255,.22)}
+button{background:linear-gradient(135deg,var(--acc),var(--acc2));border:none;color:#fff;cursor:pointer;
+font-weight:700;padding:13px;border-radius:12px;font-size:15px;width:100%;margin:8px 0;
+transition:transform .15s,box-shadow .2s,filter .2s}
+button:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(79,124,255,.35);filter:brightness(1.06)}
+button:active{transform:scale(.98)}
+button.danger{background:linear-gradient(135deg,#ef4444,#b91c1c)}
+button.ok{background:linear-gradient(135deg,#22c55e,#15803d)}
+a.paybtn{display:inline-block;background:linear-gradient(135deg,var(--acc),var(--acc2));
+color:#fff;padding:13px 20px;border-radius:12px;text-decoration:none;font-weight:700;font-size:15px;
+text-align:center;transition:transform .15s,box-shadow .2s}
+a.paybtn:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(79,124,255,.35);color:#fff}
+/* auth */
+.auth{max-width:430px;margin:6px auto}
+.authcard{padding:26px;text-align:center}
+.auth-hero .logo{font-size:46px;animation:float 3.5s ease-in-out infinite;display:inline-block}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.auth-hero h3{margin:8px 0 2px;font-size:22px}
+.auth-switch{margin-top:16px;font-size:14px;color:var(--mut)}
+.auth-switch a{font-weight:700}
+.authcard form{text-align:left}
+/* alerts (animasi) */
+.alert{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;margin:12px 0;
+font-size:14px;text-align:left;animation:slideIn .5s cubic-bezier(.2,.8,.2,1)}
+.alert .ico{font-size:18px;animation:pulse .9s .15s}
+.alert.ok{background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.45);color:#86efac}
+.alert.err{background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.5);color:#fca5a5;
+animation:slideIn .5s cubic-bezier(.2,.8,.2,1),shake .55s .12s}
+.alert.info{background:rgba(79,124,255,.14);border:1px solid rgba(79,124,255,.45);color:#a5c0ff}
+.alert.out{animation:slideOut .32s forwards}
+@keyframes slideIn{0%{opacity:0;transform:translateY(-14px) scale(.96)}55%{transform:translateY(2px) scale(1.01)}100%{opacity:1;transform:none}}
+@keyframes slideOut{to{opacity:0;transform:translateY(-10px) scale(.96)}}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,55%{transform:translateX(-7px)}35%,75%{transform:translateX(7px)}}
+@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1)}}
+/* badges */
+.badge{display:inline-block;padding:3px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.pending{background:rgba(245,158,11,.2);color:#fbbf24}.active{background:rgba(34,197,94,.2);color:#4ade80}
+.banned{background:rgba(239,68,68,.2);color:#f87171}.expired{background:rgba(148,163,184,.2);color:#cbd5e1}.none{background:#333}
+/* misc */
+pre{white-space:pre-wrap;background:#0d1120;padding:12px;border-radius:12px;border:1px solid var(--line)}
+code{background:#0d1120;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:.9em}
+pre code{background:none;border:none;padding:0}
+.msg{white-space:pre-wrap;margin:8px 0;padding:12px;border-radius:12px}
+.msg pre{margin:8px 0}.msg code{background:#0d1120}
+.user{background:rgba(43,61,128,.35);text-align:right}.ai{background:#1a2138}
+.typing{color:var(--mut);font-style:italic}
+.toolbar a{margin-right:12px;font-weight:600}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
+.paycard{background:linear-gradient(180deg,rgba(31,49,94,.45),rgba(21,27,44,.6));
+border:1px solid var(--acc);border-radius:16px;padding:18px;margin:16px 0;text-align:center}
 #wrap{position:relative}
-#sug{position:absolute;bottom:100%;left:0;right:0;background:#171a21;
-border:1px solid #333;border-radius:8px;max-height:180px;overflow:auto;
+#sug{position:absolute;bottom:100%;left:0;right:0;background:#141a30;
+border:1px solid var(--line);border-radius:12px;max-height:180px;overflow:auto;
 z-index:10;margin-bottom:4px}
 #sug.hidden{display:none}
-.sugi{padding:8px 12px;cursor:pointer;font-size:14px;
+.sugi{padding:9px 12px;cursor:pointer;font-size:14px;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sugi:hover,.sugi.on{background:#2b6bff}
+.sugi:hover,.sugi.on{background:var(--acc)}
+.hidden{display:none!important}
+"""
+
+_JS = """
+function _q(s){return document.getElementById(s)}
+var b=_q('burger'),d=_q('drawer'),k=_q('backdrop');
+function openD(){d.classList.add('on');k.classList.add('on')}
+function closeD(){d.classList.remove('on');k.classList.remove('on')}
+b.addEventListener('click',openD);
+k.addEventListener('click',closeD);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeD()});
+d.querySelectorAll('a').forEach(function(a){a.addEventListener('click',closeD)});
+document.querySelectorAll('.alert').forEach(function(a){
+  setTimeout(function(){a.classList.add('out');setTimeout(function(){a.remove()},340)},4200);
+});
 """
 
 _PAGE = """<!doctype html><html lang="id"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} · denzyx AI</title><style>{css}</style></head>
-<body><div style="text-align:center;margin:10px 0">
-<b style="font-size:20px">denzyx AI</b> <small>{subtitle}</small></div>
-{body}</body></html>"""
+<meta name="description" content="denzyx AI — member area. Chat AI, langganan, status.">
+<title>{title} · denzyx AI</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<style>{css}</style></head>
+<body>
+<div class="appbar">
+<button class="burger" id="burger" aria-label="Menu">⋮</button>
+<div class="appbar-title"><b>denzyx AI</b><small>{subtitle}</small></div>
+<div class="spacer"></div>
+<span class="pill"><span class="dot"></span>online</span>
+</div>
+<div class="drawer-backdrop" id="backdrop"></div>
+<nav class="drawer" id="drawer">
+<div class="drawer-head"><b>denzyx AI</b><small>menu &amp; plugin</small></div>
+<a href="/login">🔑 Login Member</a>
+<a href="/register">📝 Registrasi</a>
+<div class="group">Akses</div>
+<a href="/chat">💬 Chat AI</a>
+<a href="/status">📊 Status Langganan</a>
+<a href="/password">🔏 Ganti Password</a>
+<a href="/owner">🛡️ Owner Panel</a>
+<div class="group">Plugin &amp; Lainnya</div>
+<a href="/register">💳 Langganan &amp; QR</a>
+<a href="{bot}">🤖 Bot Telegram</a>
+<a href="https://github.com/radenz06/denzyxai" target="_blank" rel="noopener">📦 GitHub</a>
+<form method="post" action="/logout" class="drawer-logout">
+<input type="hidden" name="_csrf" value="__CSRF__">
+<button type="submit" class="dlogout">🚪 Logout</button></form>
+<div class="foot">denzyx web · {ver}</div>
+</nav>
+{body}
+<script>{js}</script>
+</body></html>"""
 
 
 def page(title, body, subtitle="member area"):
-    return _PAGE.format(title=title, css=_CSS, body=body, subtitle=subtitle)
+    cfg = load_config()
+    bot = (cfg.get("tg_bot_username") or "").strip().lstrip("@")
+    bot_link = f"https://t.me/{bot}" if bot else "/register"
+    return _PAGE.format(title=title, css=_CSS, body=body, subtitle=subtitle,
+                        js=_JS, bot=bot_link, ver=_VER)
 
 
 def _qr_source(cfg):
@@ -475,12 +668,21 @@ def _qr_html(cfg):
 
 
 def _login_page(cfg, msg="", err=""):
-    body = f"""<div class="card"><h3>Login Member</h3>{_flash(msg, err)}
+    body = f"""<div class="auth"><div class="card authcard">
+<div class="auth-hero"><div class="logo">⚡</div>
+<h3>Masuk Member</h3>
+<small>Lanjut pakai denzyx AI dari browser</small></div>
+{_flash(msg, err)}
 <form method="post" action="/login">
-<input name="username" placeholder="username" required>
-<input name="password" type="password" placeholder="password" required>
-<button type="submit">Masuk</button></form>
-<p><small>Belum daftar? <a href="/register">Registrasi (langganan 1 bulan · Rp {cfg.get('price_idr'):,})</a></small></p></div>"""
+<input type="hidden" name="_csrf" value="__CSRF__">
+<label>Username</label>
+<input name="username" placeholder="username kamu" required autocomplete="username">
+<label>Password</label>
+<input name="password" type="password" placeholder="••••••••" required autocomplete="current-password">
+<button type="submit">Masuk →</button></form>
+<div class="auth-switch">Belum punya akun? <a href="/register">Daftar &amp; Langganan</a>
+<small> · Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</small></div>
+</div></div>"""
     return page("Login", body)
 
 
@@ -494,25 +696,34 @@ def _register_page(cfg, msg="", err="", m=None):
 3. Setelah dikonfirmasi, akun kamu aktif otomatis
 {_pay_tg_link(cfg, m)}
 <p><small>Status kamu: <b>menunggu konfirmasi</b></small></p></div>"""
-    body = f"""<div class="card"><h3>Registrasi Member</h3>
- <p><small>Langganan 1 bulan · <b>Rp {cfg.get('price_idr'):,}</b></small></p>
- {pay}
- {_flash(msg, err)}
- <form method="post" action="/register">
- <input name="username" placeholder="username (login)" required>
- <input name="display_name" placeholder="nama panggilan">
- <input name="password" type="password" placeholder="password" required>
- <button type="submit">Daftar & Langganan</button></form>
- <p><small>Sudah daftar? <a href="/login">Login</a></small></p></div>"""
+    body = f"""<div class="auth"><div class="card authcard">
+<div class="auth-hero"><div class="logo">💳</div>
+<h3>Daftar Member</h3>
+<small>Langganan 1 bulan · <b>Rp {cfg.get('price_idr'):,}</b> / {cfg.get('sub_days')} hari</small></div>
+{pay}
+{_flash(msg, err)}
+<form method="post" action="/register">
+<input type="hidden" name="_csrf" value="__CSRF__">
+<label>Username (login)</label>
+<input name="username" placeholder="min. 3 karakter" required autocomplete="username">
+<label>Nama panggilan</label>
+<input name="display_name" placeholder="contoh: Budi">
+<label>Password</label>
+<input name="password" type="password" placeholder="min. 4 karakter" required autocomplete="new-password">
+<button type="submit">Daftar &amp; Langganan →</button></form>
+<div class="auth-switch">Sudah daftar? <a href="/login">Login</a></div>
+</div></div>"""
     return page("Registrasi", body)
 
 
 def _flash(msg, err):
     out = ""
     if msg:
-        out += f'<p style="color:#6ea8fe">{msg}</p>'
+        out += (f'<div class="alert ok"><span class="ico">✔️</span>'
+                f'<span>{html_esc(msg)}</span></div>')
     if err:
-        out += f'<p style="color:#ff6b6b">{err}</p>'
+        out += (f'<div class="alert err"><span class="ico">⚠️</span>'
+                f'<span>{html_esc(err)}</span></div>')
     return out
 
 
@@ -554,17 +765,16 @@ def _chat_page(m, cfg):
     for x in m.get("messages") or []:
         cls = "user" if x.get("role") == "user" else "ai"
         who = "Kamu" if x.get("role") == "user" else "Denzyx"
-        body = x.get("content") or ""
+        body = _md_html(x.get("content") or "")
         msgs_html += (f'<div class="msg {cls}"><small>{who}</small><br>'
                       f"{body}</div>")
-        if x.get("role") == "user" and body.strip():
-            hist.append(body.strip())
+        if x.get("role") == "user" and (x.get("content") or "").strip():
+            hist.append((x.get("content") or "").strip())
     hist_js = json.dumps(hist[-10:][::-1], ensure_ascii=False)
     samples_js = json.dumps(_CHAT_SUGGEST, ensure_ascii=False)
-    tool = '<a href="/chat">Chat</a><a href="/status">Status Langganan</a>'
+    tool = '<a href="/status">Status Langganan</a>'
     if is_admin(m):
         tool += '<a href="/admin/add">+ Tambah Member</a>'
-    tool += '<a href="/logout">Logout</a>'
     return page("Chat", f"""
 <div class="toolbar">{tool}</div>
 <div id="msgs">{msgs_html}</div>
@@ -583,6 +793,16 @@ const SAMPLES={samples_js};
 const ALL=[].concat(HIST,SAMPLES);
 let hidx=-1;
 function esc2(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+function md(s){{
+ s=esc2(s);
+ s=s.replace(/```([\\s\\S]*?)```/g,'<pre><code>$1</code></pre>');
+ s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+ s=s.replace(/\\*\\*([^*]+)\\*\\*/g,'<b>$1</b>');
+ s=s.replace(/\\*([^*]+)\\*/g,'<i>$1</i>');
+ s=s.replace(/(^|\\s)(https?:\\/\\/[^\\s<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+ return s;
+}}
+function addMsg(cls,who,inner){{msgs.insertAdjacentHTML('beforeend','<div class="msg '+cls+'"><small>'+esc2(who)+'</small><br>'+inner+'</div>');msgs.scrollTop=msgs.scrollHeight;}}
 inp.addEventListener('input',()=>{{
  const v=inp.value.trim().toLowerCase();
  const list=ALL.filter(s=>s.toLowerCase().startsWith(v)).slice(0,8);
@@ -614,18 +834,29 @@ inp.addEventListener('keydown',e=>{{
 fm.onsubmit=async e=>{{e.preventDefault();
 const v=inp.value.trim();if(!v)return;inp.value='';
 hideSug();
-msgs.insertAdjacentHTML('beforeend',
- '<div class="msg user"><small>Kamu</small><br>'+v.replace(/</g,'&lt;')+'</div>');
+addMsg('user','Kamu',esc2(v));
 const d=document.createElement('div');
-d.className='msg ai';d.innerHTML='<small>Denzyx</small><br><i>...</i>';
+d.className='msg ai';d.innerHTML='<small>Denzyx</small><br><span class="typing">…</span>';
 msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;
-const r=await fetch('/api/chat',{{method:'POST',
+let buf='';
+const reader=(await fetch('/api/chat/stream',{{method:'POST',
  headers:{{'Content-Type':'application/json'}},
- body:JSON.stringify({{message:v}})}});
-const j=await r.json();
-if(j.error){{d.innerHTML='<small>Denzyx</small><br><i>Error:</i> '+j.error;}}
-else{{d.innerHTML='<small>Denzyx</small><br>'+j.reply.replace(/</g,'&lt;');}}
-msgs.scrollTop=msgs.scrollHeight;}};
+ body:JSON.stringify({{message:v}})}})).body.getReader();
+const dec=new TextDecoder();
+for(;;){{
+ const {{value,done}}=await reader.read();
+ if(done)break;
+ const lines=dec.decode(value,{{stream:true}}).split('\\n');
+ for(const ln of lines){{if(!ln.trim())continue;
+  let j;try{{j=JSON.parse(ln);}}catch(_){{continue;}}
+  if(j.t==='text'){{buf+=j.d;d.innerHTML='<small>Denzyx</small><br>'+md(buf);}}
+  else if(j.t==='error'){{d.innerHTML='<small>Denzyx</small><br><i>Error:</i> '+esc2(j.d);}}
+  else if(j.t==='done'){{if(!buf)d.innerHTML='<small>Denzyx</small><br>'+esc2(j.d||'');}}
+ }}
+ msgs.scrollTop=msgs.scrollHeight;
+}}
+if(!buf){{d.innerHTML='<small>Denzyx</small><br><i>(tidak ada jawaban)</i>';}}
+}};
 </script>""")
 
 
@@ -643,36 +874,62 @@ def _status_page(m):
 <p><small>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari — transfer & kirim bukti, akun otomatis aktif setelah dikonfirmasi</small></p></div>"""
     return page("Status", f"""<div class="card"><h3>Status Langganan</h3>
 {pay}
-<p>Username: <b>{m['username']}</b> {badge}</p>
-<p>Nama: {m.get('display_name', '-')}</p>
-<p>Aktif s/d: <b>{m.get('expires_at') or '-'}</b></p>
-<p>Terdaftar: {m.get('created_at')}</p>
-<p><small><a href="/chat">← ke Chat</a> · <a href="/logout">Logout</a></small></p></div>""")
+<p>Username: <b>{html_esc(m['username'])}</b> {badge}</p>
+<p>Nama: {html_esc(m.get('display_name', '-'))}</p>
+<p>Aktif s/d: <b>{html_esc(m.get('expires_at') or '-')}</b></p>
+<p>Terdaftar: {html_esc(m.get('created_at'))}</p>
+<p><small><a href="/chat">← ke Chat</a> · <a href="/password">Ganti Password</a></small></p></div>""")
 
 
-def _owner_page(cfg, msg="", err=""):
+def _owner_page(cfg, msg="", err="", q="", pg=1):
+    q = (q or "").strip().lower()
+    per = int(cfg.get("owner_per_page") or 50)
     rows = []
     admins = 0
-    for m in list_members():
+    all_m = list_members()
+    if q:
+        all_m = [m for m in all_m
+                 if q in m.get("username", "").lower()
+                 or q in (m.get("display_name") or "").lower()]
+    total = len(all_m)
+    pages = max(1, -(-total // per))
+    pg = max(1, min(int(pg or 1), pages))
+    start = (pg - 1) * per
+    for m in all_m[start:start + per]:
         st = member_status(m)
         badge = f'<span class="badge {st}">{st}</span>'
         role_tag = (' <span class="badge admin">ADMIN</span>'
                     if is_admin(m) else '')
         if is_admin(m):
             admins += 1
-        rows.append(f"<tr><td>{m['username']}{role_tag}</td><td>{m.get('display_name','-')}"
-                    f"</td><td>{badge}</td><td>{m.get('expires_at') or '-'}</td>"
-                    f"<td><a href='/owner/member/{m['username']}'>detail</a></td></tr>")
+        rows.append(f"<tr><td>{html_esc(m['username'])}{role_tag}</td>"
+                    f"<td>{html_esc(m.get('display_name', '-'))}</td>"
+                    f"<td>{badge}</td><td>{html_esc(m.get('expires_at') or '-')}</td>"
+                    f"<td><a href='/owner/member/{html_esc(m['username'])}'>detail</a></td></tr>")
     table = ("<table><tr><th>username</th><th>nama</th><th>status</th>"
              "<th>aktif s/d</th><th></th></tr>" + "".join(rows) + "</table>")
+    qsafe = html_esc(q)
+    search = (f'<form method="get" action="/owner" class="toolbar-search">'
+              f'<input name="q" value="{qsafe}" placeholder="cari username/nama..." '
+              f'style="width:260px;display:inline-block;margin:0">'
+              f'<button type="submit" style="width:auto;display:inline-block;padding:10px 16px;margin:0">Cari</button></form>')
+    nav = ""
+    if pages > 1:
+        prev = max(1, pg - 1)
+        nxt = min(pages, pg + 1)
+        psep = f"&amp;q={urllib.parse.quote(q)}" if q else ""
+        nav = (f'<p><small>Hal {pg}/{pages} ({total} member) — '
+               f'<a href="/owner?pg={prev}{psep}">← Prev</a> · '
+               f'<a href="/owner?pg={nxt}{psep}">Next →</a></small></p>')
     return page("Owner Panel", f"""<div class="toolbar">
 <a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
-<a href="/owner/register">+ Daftarkan Member</a><a href="/logout">Logout</a></div>
+<a href="/owner/register">+ Daftarkan Member</a></div>
 {_flash(msg, err)}
 <div class="card"><h3>Owner Panel</h3>
-<p>Member: {len(list_members())} · Admin: {admins} · Server: {cfg.get('host')}:{cfg.get('port')}
- · Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</p></div>
-<div class="card">{table}</div>""", subtitle="owner")
+<p>Member: {total} · Admin: {admins} · Server: {html_esc(cfg.get('host'))}:{cfg.get('port')}
+ · Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</p>
+{search}</div>
+<div class="card">{table}{nav}</div>""", subtitle="owner")
 
 
 def _admin_add_page(cfg, msg="", err=""):
@@ -680,6 +937,7 @@ def _admin_add_page(cfg, msg="", err=""):
 <p><small>Member langsung AKTIF, durasi <b>Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</b>.</small></p>
 {_flash(msg, err)}
 <form method="post" action="/admin/add">
+<input type="hidden" name="_csrf" value="__CSRF__">
 <input name="username" placeholder="username (login)" required>
 <input name="display_name" placeholder="nama panggilan">
 <input name="password" type="password" placeholder="password" required>
@@ -687,7 +945,7 @@ def _admin_add_page(cfg, msg="", err=""):
 <button type="submit">Buat Member</button></form></div>"""
     return page("Tambah Member", f"""<div class="toolbar">
 <a href="/chat">Chat</a><a href="/status">Status Langganan</a>
-<a href="/admin/add">+ Tambah Member</a><a href="/logout">Logout</a></div>
+<a href="/admin/add">+ Tambah Member</a></div>
 {body}""", subtitle="admin")
 
 
@@ -698,53 +956,155 @@ def _owner_member_page(m):
         pw = dec_secret(m["password"])
     except Exception:  # noqa: BLE001
         pw = "(tidak bisa didecrypt)"
-    act = f"""<form method="post" style="display:inline">
+    csrf = '<input type="hidden" name="_csrf" value="__CSRF__">'
+    act = f"""<form method="post" style="display:inline">{csrf}
 <button class="ok" name="action" value="activate">Aktivasi 30 hari</button></form>
-<form method="post" style="display:inline">
+<form method="post" style="display:inline">{csrf}
 <button name="action" value="ban">Ban</button></form>
-<form method="post" style="display:inline">
+<form method="post" style="display:inline">{csrf}
 <button class="ok" name="action" value="unban">Unban</button></form>
-<form method="post" style="display:inline">
+<form method="post" style="display:inline">{csrf}
 <input name="days" value="30" style="width:70px;display:inline">
 <button name="action" value="extend">Perpanjang (hari)</button></form>
 """
     if m.get("role") == "admin":
-        act += ('<form method="post" style="display:inline">'
+        act += (f'<form method="post" style="display:inline">{csrf}'
                 '<button name="action" value="demote">Turunkan jadi member</button></form>')
     else:
-        act += ('<form method="post" style="display:inline">'
+        act += (f'<form method="post" style="display:inline">{csrf}'
                 '<button class="ok" name="action" value="makeadmin">Jadikan Admin</button></form>')
+    reset_pw = f"""<form method="post">{csrf}
+<input name="new_password" type="password" placeholder="password baru (min. 4)" autocomplete="off">
+<button name="action" value="resetpass">Reset Password</button></form>"""
     return page(f"Member {m['username']}", f"""<div class="card">
 <a href="/owner">← Owner Panel</a>
-<h3>Member: {m['username']} <span class="badge {st}">{st}</span></h3>
-<p>Role: <b>{m.get('role') or 'member'}</b></p>
-<p>Nama: {m.get('display_name','-')}</p>
-<p>Password (encrypt di simpan, ini buat owner): <code>{pw}</code></p>
-<p>Aktif s/d: <b>{m.get('expires_at') or '-'}</b></p>
-<p>Terdaftar: {m.get('created_at')} · IP: {m.get('ip') or '-'}</p>
-<p>Login: {m.get('login_count',0)}x · terakhir {m.get('last_login') or '-'}</p>
-<p>Catatan: {m.get('note') or '-'}</p>
+<h3>Member: {html_esc(m['username'])} <span class="badge {st}">{st}</span></h3>
+<p>Role: <b>{html_esc(m.get('role') or 'member')}</b></p>
+<p>Nama: {html_esc(m.get('display_name', '-'))}</p>
+<p>Password (encrypt di simpan, ini buat owner): <code>{html_esc(pw)}</code></p>
+<p>Aktif s/d: <b>{html_esc(m.get('expires_at') or '-')}</b></p>
+<p>Terdaftar: {html_esc(m.get('created_at'))} · IP: {html_esc(m.get('ip') or '-')}</p>
+<p>Login: {m.get('login_count', 0)}x · terakhir {html_esc(m.get('last_login') or '-')}</p>
+<p>Catatan: {html_esc(m.get('note') or '-')}</p>
 {act}</div>
-<div class="card"><h4>Sesi aktif</h4><pre>{json.dumps(m.get('sessions') or [], indent=2, ensure_ascii=False)}</pre></div>
+<div class="card"><h4>Reset password</h4>{reset_pw}</div>
+<div class="card"><h4>Sesi aktif</h4><pre>{html_esc(json.dumps(m.get('sessions') or [], indent=2, ensure_ascii=False))}</pre></div>
 <div class="card"><h4>Riwayat chat</h4>
-<a href="/owner/member/{m['username']}/md">Lihat file md sesi</a></div>""",
+<a href="/owner/member/{html_esc(m['username'])}/md">Lihat file md sesi</a></div>""",
                  subtitle="owner")
 
 
-def _owner_logs_page():
-    reg = "<br>".join(html_esc(x) for x in read_log("register", 100)) or "-"
-    login = "<br>".join(html_esc(x) for x in read_log("login", 100)) or "-"
-    adm = "<br>".join(html_esc(x) for x in read_log("admin", 150)) or "-"
+def _owner_logs_page(q="", pg=1):
+    q = (q or "").strip().lower()
+    per = 100
+    blocks = {}
+    for name, label in (("register", "Registrasi (username + password)"),
+                        ("login", "Login"),
+                        ("admin", "Aktivitas admin")):
+        rows = read_log(name, 500)
+        if q:
+            rows = [r for r in rows if q in r.lower()]
+        total = len(rows)
+        pages = max(1, -(-total // per))
+        pg = max(1, min(int(pg or 1), pages))
+        start = (pg - 1) * per
+        body = "<br>".join(html_esc(x) for x in rows[start:start + per]) or "-"
+        nav = ""
+        if pages > 1:
+            psep = f"&amp;q={urllib.parse.quote(q)}" if q else ""
+            nav = (f'<p><small>Hal {pg}/{pages} — '
+                   f'<a href="/owner/logs?pg={max(1, pg - 1)}{psep}">← Prev</a> · '
+                   f'<a href="/owner/logs?pg={min(pages, pg + 1)}{psep}">Next →</a></small></p>')
+        blocks[name] = f'<div class="card"><h3>{label}</h3><pre>{body}</pre>{nav}</div>'
+    qsafe = html_esc(q)
+    search = (f'<form method="get" action="/owner/logs" class="toolbar-search">'
+              f'<input name="q" value="{qsafe}" placeholder="cari di log..." '
+              f'style="width:260px;display:inline-block;margin:0">'
+              f'<button type="submit" style="width:auto;display:inline-block;padding:10px 16px;margin:0">Cari</button></form>')
     return page("Log Owner", f"""<a href="/owner">← Owner Panel</a>
-<div class="card"><h3>Registrasi (username + password)</h3><pre>{reg}</pre></div>
-<div class="card"><h3>Login</h3><pre>{login}</pre></div>
-<div class="card"><h3>Aktivitas admin</h3><pre>{adm}</pre></div>""",
+{search}
+{blocks['register']}
+{blocks['login']}
+{blocks['admin']}""",
                  subtitle="owner")
+
+
+def _password_page(msg="", err=""):
+    body = f"""<div class="auth"><div class="card authcard">
+<div class="auth-hero"><div class="logo">🔏</div>
+<h3>Ganti Password</h3>
+<small>Ganti password login member kamu</small></div>
+{_flash(msg, err)}
+<form method="post" action="/password">
+<input type="hidden" name="_csrf" value="__CSRF__">
+<label>Password lama</label>
+<input name="old_password" type="password" placeholder="password saat ini" required autocomplete="current-password">
+<label>Password baru</label>
+<input name="new_password" type="password" placeholder="min. 4 karakter" required autocomplete="new-password">
+<label>Ulangi password baru</label>
+<input name="confirm_password" type="password" placeholder="ketik ulang" required autocomplete="new-password">
+<button type="submit">Simpan Password Baru →</button></form>
+<div class="auth-switch"><a href="/status">← ke Status</a></div>
+</div></div>"""
+    return page("Ganti Password", body)
 
 
 def html_esc(s):
     import html
     return html.escape(str(s))
+
+
+def _md_inline(s):
+    import html as _html
+    import re
+    s = _html.escape(s)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"\*([^*]+)\*", r"<i>\1</i>", s)
+    s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+               r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+    s = re.sub(r"(^|\s)(https?://[^\s<]+)",
+               r'\1<a href="\2" target="_blank" rel="noopener">\2</a>', s)
+    return s
+
+
+def _md_html(text):
+    """Escape + render markdown dasar ke HTML aman (tanpa XSS)."""
+    lines = str(text).split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.lstrip()
+        if stripped.startswith("```"):
+            buf, i = [], i + 1
+            while i < len(lines) and not lines[i].lstrip().startswith("```"):
+                buf.append(lines[i])
+                i += 1
+            i += 1
+            out.append("<pre><code>" + html_esc("\n".join(buf)) + "</code></pre>")
+            continue
+        if not stripped:
+            out.append("")
+            i += 1
+            continue
+        if ln.startswith("### "):
+            out.append("<h4>" + _md_inline(ln[4:]) + "</h4>")
+        elif ln.startswith("## "):
+            out.append("<h4>" + _md_inline(ln[3:]) + "</h4>")
+        elif ln.startswith("# "):
+            out.append("<h3>" + _md_inline(ln[2:]) + "</h3>")
+        elif stripped[:2] in ("- ", "* ", "+ "):
+            items, i = [], i + 1
+            while True:
+                items.append(_md_inline(lines[i - 1].lstrip()[2:]))
+                if i >= len(lines) or lines[i].lstrip()[:2] not in ("- ", "* ", "+ "):
+                    break
+                i += 1
+            out.append("<ul>" + "".join(f"<li>{it}</li>" for it in items) + "</ul>")
+        else:
+            out.append(_md_inline(ln))
+            i += 1
+    return "\n".join(out)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -762,6 +1122,11 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body=b"", ctype="text/html; charset=utf-8",
               headers=None):
         headers = self._cors(headers)
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Referrer-Policy", "no-referrer")
+        if ctype.startswith("text/html"):
+            headers.setdefault("Cache-Control", "no-store")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -796,6 +1161,48 @@ class Handler(BaseHTTPRequestHandler):
                 return {}
         return {k: v[0] for k, v in
                 urllib.parse.parse_qs(body.decode("utf-8")).items()}
+
+    def _query(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return {k: v[0] for k, v in q.items()}
+
+    def _ip(self):
+        return str(self.client_address[0])
+
+    # --- csrf (per-sesi, HMAC di cookie HttpOnly) ---
+    def _ensure_csrf(self):
+        raw = getattr(self, "_csrf_raw", None)
+        if not raw:
+            raw = self._cookies().get("denz_csrf") or secrets.token_hex(16)
+            self._csrf_raw = raw
+        return raw
+
+    def _csrf_tok(self):
+        raw = self._ensure_csrf()
+        secret = load_config().get("secret") or "x"
+        return hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+    def _csrf_ok(self, data):
+        raw = self._cookies().get("denz_csrf")
+        sub = str(data.get("_csrf") or "")
+        if not raw or not sub:
+            return False
+        secret = load_config().get("secret") or "x"
+        exp = hmac.new(secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+        return secrets.compare_digest(exp, sub)
+
+    def _html(self, body_bytes):
+        """Kirim halaman HTML + pastikan cookie CSRF + injeksi token."""
+        tok = self._csrf_tok()
+        hdr = {"Set-Cookie": _cookie("denz_csrf", self._ensure_csrf())}
+        self._send(200, body_bytes.replace(b"__CSRF__", tok.encode()),
+                   headers=hdr)
+
+    def _rate_limit(self, key, max_hits, window_sec):
+        cfg = load_config()
+        return _RL.hit(key,
+                       int(max_hits or cfg.get("rate_max_attempts", 8)),
+                       int(window_sec or cfg.get("rate_window_sec", 600)))
 
     def _redirect(self, loc, headers=None):
         self._send(HTTPStatus.FOUND, b"", headers={"Location": loc,
@@ -836,35 +1243,38 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/me":
             self._api_me(m)
         elif path == "/login":
-            self._send(200, _login_page(cfg).encode())
+            self._html(_login_page(cfg).encode())
         elif path == "/register":
-            self._send(200, _register_page(cfg).encode())
+            self._html(_register_page(cfg).encode())
         elif path == "/qr":
             self._serve_qr(cfg)
         elif path == "/status":
             if not m:
                 self._redirect("/login")
             else:
-                self._send(200, _status_page(m).encode())
+                self._html(_status_page(m).encode())
         elif path == "/chat":
             if not m:
                 self._redirect("/login")
             else:
-                self._send(200, _chat_page(m, cfg).encode())
+                self._html(_chat_page(m, cfg).encode())
+        elif path == "/password":
+            if not m:
+                self._redirect("/login")
+            else:
+                self._html(_password_page().encode())
         elif path == "/admin/add":
             if not self._auth_admin():
                 self._redirect("/chat")
             else:
-                self._send(200, _admin_add_page(cfg).encode())
-        elif path == "/logout":
-            self._redirect("/login")
+                self._html(_admin_add_page(cfg).encode())
         elif path.startswith("/owner"):
             if not self._auth_owner():
-                self._send(200, _owner_login_page(cfg).encode())
+                self._html(_owner_login_page(cfg).encode())
             else:
                 self._owner_get(path, cfg)
         else:
-            self._send(404, page("404", "<p>404</p>").encode())
+            self._html(page("404", "<p>404</p>").encode())
 
     def do_POST(self):
         cfg = load_config()
@@ -874,30 +1284,60 @@ class Handler(BaseHTTPRequestHandler):
             self._api_register(data)
         elif path == "/api/login":
             self._api_login(data)
-        elif path == "/login":
-            self._post_login(cfg, data)
-        elif path == "/register":
-            self._post_register(cfg, data)
         elif path == "/api/chat":
             self._post_chat(data)
+        elif path == "/api/chat/stream":
+            self._post_chat_stream(data)
+        elif path == "/logout":
+            if self._csrf_ok(data):
+                hdr = {"Set-Cookie": _cookie("denz_member", "", max_age=0)}
+                self._redirect("/login", hdr)
+            else:
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+        elif path == "/login":
+            if not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+            else:
+                self._post_login(cfg, data)
+        elif path == "/register":
+            if not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+            else:
+                self._post_register(cfg, data)
+        elif path == "/password":
+            if not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+            else:
+                self._post_password(data)
         elif path == "/admin/add":
             if not self._auth_admin():
                 self._redirect("/chat")
+            elif not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
             else:
                 self._post_admin_add(cfg, data)
         elif path == "/owner/login":
-            self._post_owner_login(cfg, data)
+            if not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+            else:
+                self._post_owner_login(cfg, data)
         elif path.startswith("/owner"):
             if not self._auth_owner():
                 self._redirect("/owner")
+            elif not self._csrf_ok(data):
+                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
             else:
                 self._owner_post(path, data)
         else:
-            self._send(404, page("404", "<p>404</p>").encode())
+            self._html(page("404", "<p>404</p>").encode())
 
     # --- api json (untuk frontend vercel) ---
     def _api_register(self, data):
         cfg = load_config()
+        if not self._rate_limit(f"reg:{self._ip()}", cfg.get("rate_max_attempts", 8),
+                                cfg.get("rate_window_sec", 600)):
+            self._json(429, {"ok": False, "error": "terlalu banyak percobaan, coba lagi nanti"})
+            return
         username = str(data.get("username") or "").strip()
         display = str(data.get("display_name") or "").strip()
         password = str(data.get("password") or "")
@@ -907,9 +1347,9 @@ class Handler(BaseHTTPRequestHandler):
         if load_member(username):
             self._json(400, {"ok": False, "error": "username sudah dipakai"})
             return
-        create_member(username, password, display, self.client_address[0])
+        create_member(username, password, display, self._ip())
         from denzbot import tg_notify
-        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self.client_address[0]}. Cek owner panel untuk aktivasi.")
+        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self._ip()}. Cek owner panel untuk aktivasi.")
         m = load_member(username)
         self._json(200, {"ok": True, "username": username,
                          "status": member_status(m),
@@ -918,6 +1358,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_login(self, data):
         cfg = load_config()
+        if not self._rate_limit(f"login:{self._ip()}", cfg.get("rate_max_attempts", 8),
+                                cfg.get("rate_window_sec", 600)):
+            self._json(429, {"ok": False, "error": "terlalu banyak percobaan, coba lagi nanti"})
+            return
         username = str(data.get("username") or "").strip()
         password = str(data.get("password") or "")
         m = load_member(username)
@@ -927,7 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok = secrets.compare_digest(dec_secret(m["password"]), password)
             except Exception:  # noqa: BLE001
                 ok = False
-        log_login(username, ok, self.client_address[0])
+        log_login(username, ok, self._ip())
         if not ok:
             self._json(401, {"ok": False, "error": "username/password salah"})
             return
@@ -976,9 +1420,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "no qr")
             return
         ctype = mimetypes.guess_type(qr)[0] or "image/jpeg"
-        self._send(200, Path(qr).read_bytes(), ctype)
+        self._send(200, Path(qr).read_bytes(), ctype,
+                   headers={"Cache-Control": "public, max-age=3600"})
 
     def _post_login(self, cfg, data):
+        if not self._rate_limit(f"login:{self._ip()}", cfg.get("rate_max_attempts", 8),
+                                cfg.get("rate_window_sec", 600)):
+            self._html(_login_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
+            return
         username = str(data.get("username") or "").strip()
         password = str(data.get("password") or "")
         m = load_member(username)
@@ -989,40 +1438,44 @@ class Handler(BaseHTTPRequestHandler):
                 ok = secrets.compare_digest(stored, password)
             except Exception:  # noqa: BLE001
                 ok = False
-        log_login(username, ok, self.client_address[0])
+        log_login(username, ok, self._ip())
         if not ok:
-            self._send(200, _login_page(cfg, err="username/password salah").encode())
+            self._html(_login_page(cfg, err="username/password salah").encode())
             return
         st = member_status(m)
         if st == "banned":
-            self._send(200, _login_page(cfg, err="akun diblokir (banned)").encode())
+            self._html(_login_page(cfg, err="akun diblokir (banned)").encode())
             return
         if st == "pending":
-            self._send(200, _login_page(cfg, err="menunggu konfirmasi pembayaran").encode())
+            self._html(_login_page(cfg, err="menunggu konfirmasi pembayaran").encode())
             return
         if st == "expired":
-            self._send(200, _login_page(cfg, err="langganan kedaluwarsa — hubungi owner").encode())
+            self._html(_login_page(cfg, err="langganan kedaluwarsa — hubungi owner").encode())
             return
-        tok = issue_member_session(username, self.client_address[0])
+        tok = issue_member_session(username, self._ip())
         from denzbot import tg_notify
-        tg_notify(f"🔓 Login member: {username} ({self.client_address[0]})")
-        self._redirect("/chat", {"Set-Cookie": f"denz_member={tok}; Path=/; HttpOnly"})
+        tg_notify(f"🔓 Login member: {username} ({self._ip()})")
+        self._redirect("/chat", {"Set-Cookie": _cookie("denz_member", tok)})
 
     def _post_register(self, cfg, data):
+        if not self._rate_limit(f"reg:{self._ip()}", cfg.get("rate_max_attempts", 8),
+                                cfg.get("rate_window_sec", 600)):
+            self._html(_register_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
+            return
         username = str(data.get("username") or "").strip()
         display = str(data.get("display_name") or "").strip()
         password = str(data.get("password") or "")
         if len(username) < 3 or len(password) < 4:
-            self._send(200, _register_page(cfg, err="username min 3, password min 4").encode())
+            self._html(_register_page(cfg, err="username min 3, password min 4").encode())
             return
         if load_member(username):
-            self._send(200, _register_page(cfg, err="username sudah dipakai").encode())
+            self._html(_register_page(cfg, err="username sudah dipakai").encode())
             return
-        create_member(username, password, display, self.client_address[0])
+        create_member(username, password, display, self._ip())
         from denzbot import tg_notify
-        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self.client_address[0]}. Cek owner panel untuk aktivasi.")
+        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self._ip()}. Cek owner panel untuk aktivasi.")
         m = load_member(username)
-        self._send(200, _register_page(
+        self._html(_register_page(
             cfg, msg=f"Berhasil daftar, {username}.", m=m).encode())
 
     def _post_admin_add(self, cfg, data):
@@ -1032,21 +1485,21 @@ class Handler(BaseHTTPRequestHandler):
         password = str(data.get("password") or "")
         days = str(data.get("days") or "").strip()
         if len(username) < 3 or len(password) < 4:
-            self._send(200, _admin_add_page(cfg, err="username min 3, password min 4").encode())
+            self._html(_admin_add_page(cfg, err="username min 3, password min 4").encode())
             return
         if load_member(username):
-            self._send(200, _admin_add_page(cfg, err="username sudah dipakai").encode())
+            self._html(_admin_add_page(cfg, err="username sudah dipakai").encode())
             return
         try:
             days_i = int(days) if days else None
         except ValueError:
             days_i = None
         add_member_active(username, password, display, days=days_i,
-                          role="member", by=self.client_address[0])
+                          role="member", by=self._ip())
         from denzbot import tg_notify
         tg_notify(f"➕ MEMBER BARU via admin web: {username} ({display})")
         m = load_member(username)
-        self._send(200, _admin_add_page(
+        self._html(_admin_add_page(
             cfg, msg=f"✅ Member {username} aktif s/d {m.get('expires_at')}.").encode())
 
     def _post_chat(self, data):
@@ -1058,6 +1511,12 @@ class Handler(BaseHTTPRequestHandler):
         if st != "active":
             self._json(403, {"error": f"status: {st}"})
             return
+        cfg = load_config()
+        if not self._rate_limit(f"chat:{m['username']}",
+                                cfg.get("chat_rate_max", 30),
+                                cfg.get("chat_rate_window", 60)):
+            self._json(429, {"error": "terlalu cepat, tunggu sebentar"})
+            return
         prompt = str(data.get("message") or "").strip()
         if not prompt:
             self._json(400, {"error": "pesan kosong"})
@@ -1068,7 +1527,102 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(200, {"reply": reply or "(tanpa jawaban)"})
 
+    def _post_chat_stream(self, data):
+        """Chat streaming: kirim NDJSON chunked per potongan jawaban AI."""
+        m, _ = self._auth_member()
+        if not m:
+            self._json(401, {"error": "login dulu"})
+            return
+        st = member_status(m)
+        if st != "active":
+            self._json(403, {"error": f"status: {st}"})
+            return
+        cfg = load_config()
+        if not self._rate_limit(f"chat:{m['username']}",
+                                cfg.get("chat_rate_max", 30),
+                                cfg.get("chat_rate_window", 60)):
+            self._json(429, {"error": "terlalu cepat, tunggu sebentar"})
+            return
+        prompt = str(data.get("message") or "").strip()
+        if not prompt:
+            self._json(400, {"error": "pesan kosong"})
+            return
+        import denzyx
+        state = _chat_state(m["username"])
+        q = queue.Queue()
+        t = threading.Thread(target=denzyx.stream_chat,
+                             args=(state, prompt, q), daemon=True)
+        t.start()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def emit(obj):
+            raw = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(raw):x}\r\n".encode() + raw + b"\r\n")
+            self.wfile.flush()
+
+        try:
+            parts, error = [], None
+            while True:
+                try:
+                    kind, val = q.get(timeout=0.5)
+                except queue.Empty:
+                    if not t.is_alive():
+                        break
+                    continue
+                if kind == "content":
+                    parts.append(val)
+                    emit({"t": "text", "d": val})
+                elif kind == "error":
+                    error = val
+                    emit({"t": "error", "d": val})
+                elif kind == "done":
+                    break
+            t.join(timeout=5)
+            reply = "".join(parts).strip() if parts else None
+            append_chat(m["username"], prompt, reply)
+            emit({"t": "done", "d": reply or ""})
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _post_password(self, data):
+        m, _ = self._auth_member()
+        if not m:
+            self._redirect("/login")
+            return
+        old = str(data.get("old_password") or "")
+        new = str(data.get("new_password") or "")
+        conf = str(data.get("confirm_password") or "")
+        try:
+            ok_old = secrets.compare_digest(dec_secret(m["password"]), old)
+        except Exception:  # noqa: BLE001
+            ok_old = False
+        if not ok_old:
+            self._html(_password_page(err="password lama salah").encode())
+            return
+        if len(new) < 4:
+            self._html(_password_page(err="password baru minimal 4 karakter").encode())
+            return
+        if new != conf:
+            self._html(_password_page(err="konfirmasi password tidak cocok").encode())
+            return
+        m["password"] = enc_secret(new)
+        save_member(m)
+        log_activity("change_password", m["username"])
+        from denzbot import tg_notify
+        tg_notify(f"🔏 Ganti password member: {m['username']} ({self._ip()})")
+        self._html(_password_page(msg="Password berhasil diganti.").encode())
+
     def _post_owner_login(self, cfg, data):
+        if not self._rate_limit(f"owner:{self._ip()}", cfg.get("rate_max_attempts", 8),
+                                cfg.get("rate_window_sec", 600)):
+            self._html(_owner_login_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
+            return
         user = str(data.get("username") or "")
         pw = str(data.get("password") or "")
         own = cfg.get("owner") or {}
@@ -1076,19 +1630,22 @@ class Handler(BaseHTTPRequestHandler):
               and verify_password(pw, own.get("salt", ""), own.get("password_hash", "")))
         log_activity("owner_login", f"{user} -> {'ok' if ok else 'gagal'}")
         if not ok:
-            self._send(200, _owner_login_page(cfg, err="kredensial salah").encode())
+            self._html(_owner_login_page(cfg, err="kredensial salah").encode())
             return
         tok = issue_owner_token()
-        self._redirect("/owner", {"Set-Cookie": f"denz_owner={tok}; Path=/; HttpOnly"})
+        self._redirect("/owner", {"Set-Cookie": _cookie("denz_owner", tok)})
 
     # --- owner ---
     def _owner_get(self, path, cfg):
+        q = self._query()
         if path == "/owner" or path == "/owner/":
-            self._send(200, _owner_page(cfg).encode())
+            self._html(_owner_page(cfg, q=q.get("q", ""),
+                                   pg=int(q.get("pg") or 1)).encode())
         elif path == "/owner/logs":
-            self._send(200, _owner_logs_page().encode())
+            self._html(_owner_logs_page(q=q.get("q", ""),
+                                        pg=int(q.get("pg") or 1)).encode())
         elif path == "/owner/register":
-            self._send(200, _register_page(cfg, msg="Daftarkan member baru dari sini (owner).").encode())
+            self._html(_register_page(cfg, msg="Daftarkan member baru dari sini (owner).").encode())
         elif path.startswith("/owner/member/"):
             rest = path[len("/owner/member/"):]
             if rest.endswith("/md"):
@@ -1104,9 +1661,9 @@ class Handler(BaseHTTPRequestHandler):
             if not m:
                 self._send(404, "member tidak ada")
             else:
-                self._send(200, _owner_member_page(m).encode())
+                self._html(_owner_member_page(m).encode())
         else:
-            self._send(404, page("404", "<p>404</p>").encode())
+            self._html(page("404", "<p>404</p>").encode())
 
     def _owner_post(self, path, data):
         if path.startswith("/owner/member/"):
@@ -1141,6 +1698,14 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "demote":
                 m["role"] = "member"
                 log_activity("rmadmin", username)
+            elif action == "resetpass":
+                new = str(data.get("new_password") or "")
+                if len(new) >= 4:
+                    m["password"] = enc_secret(new)
+                    log_activity("resetpass", username)
+                else:
+                    self._redirect(f"/owner/member/{username}")
+                    return
             save_member(m)
             write_session_md(m)
             from denzbot import tg_notify
@@ -1151,14 +1716,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _owner_login_page(cfg, msg="", err=""):
-    return page("Owner Login", f"""<div class="card"><h3>Owner Panel</h3>
+    body = f"""<div class="auth"><div class="card authcard">
+<div class="auth-hero"><div class="logo">🛡️</div>
+<h3>Owner Panel</h3>
+<small>Kredensial owner terenkripsi (salted hash)</small></div>
 {_flash(msg, err)}
 <form method="post" action="/owner/login">
-<input name="username" placeholder="owner username" required>
-<input name="password" type="password" placeholder="owner password" required>
-<button type="submit">Masuk Owner</button></form>
-<p><small>Kredensial owner terenkripsi (salted hash).</small></p></div>""",
-                 subtitle="owner")
+<input type="hidden" name="_csrf" value="__CSRF__">
+<label>Username owner</label>
+<input name="username" placeholder="owner username" required autocomplete="username">
+<label>Password owner</label>
+<input name="password" type="password" placeholder="••••••••" required autocomplete="current-password">
+<button type="submit">Masuk Owner →</button></form>
+<div class="auth-switch"><a href="/login">← ke Login Member</a></div>
+</div></div>"""
+    return page("Owner Login", body, subtitle="owner")
 
 
 # ---------------------------------------------------------------------------
@@ -1166,12 +1738,26 @@ def _owner_login_page(cfg, msg="", err=""):
 # ---------------------------------------------------------------------------
 
 def start_server(cfg=None, quiet=False):
+    global _HTTPS
     cfg = cfg or load_config()
     _mkdirs()
     host, port = cfg.get("host", "0.0.0.0"), int(cfg.get("port", 8000))
     srv = ThreadingHTTPServer((host, port), Handler)
+    cert, key = (cfg.get("ssl_cert") or "").strip(), (cfg.get("ssl_key") or "").strip()
+    if cert and key and Path(cert).exists() and Path(key).exists():
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        _HTTPS = True
+        scheme = "https"
+    else:
+        _HTTPS = False
+        scheme = "http"
+        if cert or key:
+            print("[webdenz] peringatan: ssl_cert/ssl_key diisi tapi file tidak ada — pakai HTTP")
     if not quiet:
-        print(f"[webdenz] server jalan di http://{host}:{port}")
+        print(f"[webdenz] server jalan di {scheme}://{host}:{port}")
     srv.serve_forever()
     return srv
 
