@@ -1548,8 +1548,8 @@ class Handler(BaseHTTPRequestHandler):
     def _ip(self):
         return getattr(self, "_real_ip", str(self.client_address[0]))
 
-    def _reg_notify(self, username, display):
-        """Notifikasi registrasi detail ke owner TG (thread background).
+    def _event_notify(self, title, username, subtitle="", footer=""):
+        """Notifikasi event TG detail (registrasi/login) — thread background.
 
         Merangkum IP publik/private + peer, geolokasi & ISP, perangkat/
         software (dari User-Agent), dan waktu lengkap (tanggal-jam-tahun).
@@ -1573,9 +1573,12 @@ class Handler(BaseHTTPRequestHandler):
             bot = "YA 🤖" if p["is_bot"] else "Tidak"
             ref = str(self.headers.get("Referer") or "-")[:200]
             lines = [
-                "📝 REGISTRASI BARU",
+                title,
                 f"👤 Username : {username}",
-                f"🪪 Nama     : {display or '-'}",
+            ]
+            if subtitle:
+                lines.append(subtitle)
+            lines += [
                 f"🕐 Waktu    : {now} ({tz})",
                 "",
                 f"🌐 IP Publik: {ip}  [ {cls_label} ]",
@@ -1601,8 +1604,9 @@ class Handler(BaseHTTPRequestHandler):
                 if org and org != isp:
                     lines.insert(9, f"🗄 Org      : {org}")
                 lines.insert(10, f"🔌 Tipe     : {conn}")
-            lines.append("")
-            lines.append("⚠️ Cek owner panel untuk aktivasi.")
+            if footer:
+                lines.append("")
+                lines.append(footer)
             return "\n".join(lines)
 
         def _send():
@@ -1613,6 +1617,16 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
         threading.Thread(target=_send, daemon=True).start()
+
+    def _reg_notify(self, username, display):
+        self._event_notify(
+            "📝 REGISTRASI BARU", username,
+            subtitle=f"🪪 Nama     : {display or '-'}",
+            footer="⚠️ Cek owner panel untuk aktivasi.")
+
+    def _login_notify(self, username):
+        self._event_notify("🔓 LOGIN MEMBER", username,
+                           footer="⚠️ Bukan kamu? Hubungi owner.")
 
     # --- waf / keamanan ---
     def _prelude(self):
@@ -1954,8 +1968,7 @@ class Handler(BaseHTTPRequestHandler):
                              "pay_link": _pay_tg_link(cfg, m)})
             return
         tok = issue_member_session(username, self._ip())
-        from denzbot import tg_notify
-        tg_notify(f"🔓 Login member: {username} ({self.client_address[0]})")
+        self._login_notify(username)
         self._json(200, {"ok": True, "token": tok, "username": username,
                          "status": st, "expires_at": m.get("expires_at"),
                          "chat_url": "/chat"})
@@ -2021,8 +2034,7 @@ class Handler(BaseHTTPRequestHandler):
             self._html(_login_page(cfg, err="langganan kedaluwarsa — hubungi owner").encode())
             return
         tok = issue_member_session(username, self._ip())
-        from denzbot import tg_notify
-        tg_notify(f"🔓 Login member: {username} ({self._ip()})")
+        self._login_notify(username)
         self._redirect("/chat", {"Set-Cookie": _cookie(
             "denz_member", tok, secure=getattr(self, "_secure", False))})
 

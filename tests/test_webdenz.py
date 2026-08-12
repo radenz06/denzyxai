@@ -844,3 +844,75 @@ class TestVisitors:
         finally:
             srv.shutdown()
             t.join(timeout=3)
+
+    def test_login_notify_detail(self, wd, monkeypatch):
+        """Notifikasi login member juga detail (bukan cuma IP)."""
+        import webdenz
+        h = object.__new__(webdenz.Handler)
+        h.client_address = ("127.0.0.1", 4321)
+        h._real_ip = "203.0.113.9"
+        h.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0.0.0 Safari/537.36",
+            "CF-Connecting-IP": "203.0.113.9",
+            "X-Forwarded-For": "203.0.113.9",
+            "Referer": "http://localhost:8000/login",
+        }
+        import denzbot
+        captured = []
+        monkeypatch.setattr(denzbot, "tg_notify", lambda text: captured.append(text))
+        h._login_notify("budi")
+        for _ in range(100):
+            if captured:
+                break
+            import time
+            time.sleep(0.1)
+        assert captured, "notifikasi login tidak terkirim"
+        msg = captured[0]
+        assert "LOGIN MEMBER" in msg
+        assert "budi" in msg
+        assert "203.0.113.9" in msg
+        assert "Windows" in msg and "Chrome" in msg
+        assert "Waktu" in msg
+
+    def test_remind_expiring(self, wd, monkeypatch):
+        """Member yang hampir habis (H-2/H-1) diingatkan owner + member."""
+        import webdenz
+        from datetime import datetime, timedelta
+        import denzbot
+
+        # aktif, habis H-2 → harus muncul
+        m = webdenz.create_member("h2", "pw1234", "H2")
+        m["status"] = "active"
+        m["expires_at"] = (datetime.now() + timedelta(days=2)).isoformat()
+        m["tg_chat_id"] = "10001"
+        webdenz.save_member(m)
+        # aktif, habis H-5 → tidak usah
+        m2 = webdenz.create_member("h5", "pw1234", "H5")
+        m2["status"] = "active"
+        m2["expires_at"] = (datetime.now() + timedelta(days=5)).isoformat()
+        webdenz.save_member(m2)
+        # sudah lewat → tidak usah
+        m3 = webdenz.create_member("gone", "pw1234", "Gone")
+        m3["status"] = "active"
+        m3["expires_at"] = (datetime.now() - timedelta(days=1)).isoformat()
+        webdenz.save_member(m3)
+
+        import denzbot as db
+        sent = []
+        monkeypatch.setattr(db, "tg_notify", lambda text: sent.append(text))
+        monkeypatch.setattr(db, "tg_send", lambda cid, text: sent.append((cid, text)))
+
+        db._remind_expiring("OWNER", {})
+        joined = "\n".join(str(s) for s in sent)
+        assert "h2" in joined
+        assert "h5" not in joined
+        assert "gone" not in joined
+        assert "10001" in joined  # member langsung dapat notif
+
+        # kedua kalinya → tidak spam (state tersimpan)
+        sent.clear()
+        db._remind_expiring("OWNER", {})
+        assert not sent
+

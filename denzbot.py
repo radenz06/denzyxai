@@ -518,6 +518,79 @@ def poll_once(token, offset):
     return new_offset, upds
 
 
+def _remind_state():
+    """File state pengingat: {username: expires_at_yang_sudah_diingatkan}."""
+    p = Path(__file__).resolve().parent / "webdata" / ".remind_expire.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _remind_save(state):
+    try:
+        p = Path(__file__).resolve().parent / "webdata" / ".remind_expire.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _remind_expiring(owner_id, cfg):
+    """Ingatkan owner + member yang langganannya hampir habis (H-2 dan H-1).
+
+    Dijalankan berkala dari loop bot. Tidak spam: satu kali per masa
+    aktif (state disimpan per expires_at).
+    """
+    from datetime import datetime, timedelta
+    state = _remind_state()
+    now = datetime.now()
+    due = []          # member yang hampir habis → kirim ke owner
+    notif_members = []  # → kirim pengingat langsung ke member (bila ada tg)
+    for m in webdenz.list_members():
+        if webdenz.member_status(m) != "active":
+            continue
+        exp = webdenz._parse_dt(m.get("expires_at"))
+        if not exp:
+            continue
+        days = (exp - now).days
+        if days not in (1, 2):
+            continue
+        if state.get(m["username"]) == m.get("expires_at"):
+            continue  # sudah diingatkan untuk masa aktif ini
+        state[m["username"]] = m.get("expires_at")
+        due.append((m, days, exp))
+        if m.get("tg_chat_id"):
+            notif_members.append((m, days))
+    # bersihkan state yang sudah lewat / tidak aktif lagi
+    for u in list(state):
+        m = webdenz.load_member(u)
+        if not m or webdenz.member_status(m) != "active":
+            state.pop(u, None)
+        else:
+            exp = webdenz._parse_dt(m.get("expires_at"))
+            if exp and exp < now:
+                state.pop(u, None)
+    if due or notif_members:
+        _remind_save(state)
+    # notif ke member langsung
+    for m, days in notif_members:
+        label = "BESOK" if days == 1 else "2 HARI LAGI"
+        text = (f"⏳ Langganan kamu akan habis {label} ({m.get('expires_at')}).\n"
+                f"Perpanjang sebelum habis supaya akses tidak terputus.\n"
+                f"Hubungi owner untuk perpanjangan 🙏")
+        tg_send(m["tg_chat_id"], text)
+    # notif ringkas ke owner
+    if due:
+        lines = [f"⏰ {len(due)} langganan hampir habis:"]
+        for m, days, exp in due:
+            label = "BESOK" if days == 1 else "H-2"
+            lines.append(f"• {m['username']} — {label} ({exp})")
+        lines.append("\nPerpanjang: /extend <user> <hari>")
+        tg_notify("\n".join(lines))
+
+
 def run_bot(stop_evt=None, verbose=True):
     cfg = webdenz.load_config()
     token = cfg.get("tg_bot_token")
@@ -528,9 +601,18 @@ def run_bot(stop_evt=None, verbose=True):
     if verbose:
         print(f"[denzbot] bot aktif (owner chat id: {owner_id})")
     offset = 0
+    last_remind = 0.0
     while True:
         if stop_evt is not None and stop_evt.is_set():
             break
+        # pengingat langganan hampir habis (tiap 6 jam, non-blocking)
+        if time.time() - last_remind >= 6 * 3600:
+            last_remind = time.time()
+            try:
+                _remind_expiring(owner_id, cfg)
+            except Exception as e:  # noqa: BLE001
+                if verbose:
+                    print(f"[denzbot] remind error: {e}")
         try:
             offset, upds = poll_once(token, offset)
         except Exception as e:  # noqa: BLE001

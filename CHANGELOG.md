@@ -4,6 +4,20 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.3] - 2026-08-12
+
+### Ditambahkan
+- **Pengingat langganan hampir habis**: bot otomatis memberitahu owner
+  (`⏰ N langganan hampir habis` + daftar H-2/H-1) dan member langsung via
+  TG setiap 6 jam. Tidak spam — sekali per masa aktif (state di
+  `webdata/.remind_expire.json`).
+- **Notifikasi login member detail**: kini sama lengkapnya dengan notifikasi
+  registrasi (IP publik/private + peer + CF/XFF, geolokasi & ISP, browser ·
+  OS · device · engine, waktu lengkap, referer) lewat `_event_notify`.
+- Default `host` dipakai: `127.0.0.1` (akses hanya lewat tunnel, bukan
+  terbuka ke jaringan).
+- Regression test: `test_login_notify_detail`, `test_remind_expiring`.
+
 ## [3.3.2] - 2026-08-12
 
 ### Ditambahkan
