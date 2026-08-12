@@ -663,6 +663,17 @@ d.querySelectorAll('a').forEach(function(a){a.addEventListener('click',closeD)})
 document.querySelectorAll('.alert').forEach(function(a){
   setTimeout(function(){a.classList.add('out');setTimeout(function(){a.remove()},340)},4200);
 });
+/* beacon perangkat: screen, timezone, CPU, memory, baterai — /api/ping */
+function _beacon(){
+  try{
+    var info={screen:(screen.width+'x'+screen.height),tz:Intl.DateTimeFormat().resolvedOptions().timeZone||'',lang:(navigator.language||'')};
+    if(navigator.hardwareConcurrency)info.cpu_cores=navigator.hardwareConcurrency;
+    if(navigator.deviceMemory)info.mem_gb=navigator.deviceMemory;
+    if('getBattery' in navigator){navigator.getBattery().then(function(bt){if(bt)info.battery=Math.round(bt.level*100)})}
+    navigator.sendBeacon('/api/ping',new Blob([JSON.stringify(info)],{type:'application/json'}));
+  }catch(e){}
+}
+setTimeout(_beacon,1500);
 """
 
 _PAGE = """<!doctype html><html lang="id"><head><meta charset="utf-8">
@@ -1177,8 +1188,9 @@ def _owner_visitors_page(msg="", err="", q="", pg=1, sort="last"):
 {_flash(msg, err)}
 <div class="card"><h3>👁️ Pengunjung Web</h3>
 <p><small>Semua yang masuk ke web: IP public/private, lokasi & ISP,
-software (browser/OS/device), path, waktu. Data di
-<code>webdata/visitors.json</code>.</small></p>
+software (browser/OS/device), bahasa, screen, timezone, CPU/memori,
+riwayat login. Data terenkripsi (Fernet) di
+<code>webdata/visitors.json</code> — tidak terbaca mentah.</small></p>
 {cards}
 {search}</div>
 <div class="card">{table}{nav}
@@ -1214,10 +1226,21 @@ def _owner_visitor_page(ip, msg="", err=""):
         ("Device", v.get("device", "-")),
         ("Engine", v.get("engine", "-")),
         ("Bot?", "Ya" if v.get("is_bot") else "Tidak"),
+        ("Bahasa (Accept-Language)", v.get("lang", "-") or "-"),
+        ("Do-Not-Track", "Ya" if v.get("dnt") else "Tidak"),
+        ("Screen", v.get("screen", "-") or "-"),
+        ("Timezone", v.get("tz", "-") or "-"),
+        ("Memory", (v.get("mem_gb", "-") or "-") + " GB"),
+        ("CPU cores", v.get("cpu_cores", "-") or "-"),
+        ("Baterai", (v.get("battery", "-") or "-") + "%"),
         ("Pertama kali", v.get("first_seen", "-")),
         ("Terakhir", v.get("last_seen", "-")),
         ("Total kunjungan", str(v.get("visits", 0))),
     ]
+    if v.get("last_login"):
+        rows.append(("Login terakhir", f"{v['last_login']} — {v.get('last_login_user') or '-'}"))
+    if v.get("last_fail"):
+        rows.append(("Login gagal terakhir", f"{v['last_fail']} — {v.get('last_fail_user') or '-'}"))
     if v.get("ip") in bans:
         rows.append(("Status WAF", "⛔ BANNED — " + (bans[v["ip"]].get("reason") or "")))
     tbl = "<table>" + "".join(
@@ -1227,6 +1250,12 @@ def _owner_visitor_page(ip, msg="", err=""):
                          for m, c in (v.get("methods") or {}).items()) or "-"
     statuses = " · ".join(f"<code>{html_esc(s)}</code> {c}x"
                           for s, c in (v.get("statuses") or {}).items()) or "-"
+    hints = " · ".join(f"<code>{html_esc(k)}</code> {html_esc(val)}"
+                       for k, val in (v.get("client_hints") or {}).items()) or "-"
+    logins = "".join(
+        f"<li><small>{html_esc(e.get('ts') or '')}</small> "
+        f"{'✅' if e.get('ok') else '❌'} <code>{html_esc(e.get('user') or '-')}</code></li>"
+        for e in (v.get("login_events") or [])) or "<li>-</li>"
     paths = "".join(f"<li><code>{html_esc(p)}</code></li>"
                     for p in (v.get("paths") or [])) or "<li>-</li>"
     refs = "".join(f"<li><small>{html_esc(r)}</small></li>"
@@ -1261,6 +1290,8 @@ style="width:auto;display:inline-block;padding:8px 14px">⛔ Ban IP ini</button>
 <div class="card"><h3>Metode & Status</h3>
 <p><small>Metode:</small> {methods}</p>
 <p><small>Status:</small> {statuses}</p></div>
+<div class="card"><h3>Client Hints</h3><p><small>{hints}</small></p></div>
+<div class="card"><h3>Riwayat Login</h3><ul>{logins}</ul></div>
 <div class="card"><h3>Path yang dikunjungi</h3><ul>{paths}</ul></div>
 <div class="card"><h3>Referer</h3><ul>{refs}</ul></div>
 <div class="card"><h3>Riwayat terakhir</h3>{log_tbl}</div>""", subtitle="owner")
@@ -1639,7 +1670,7 @@ class Handler(BaseHTTPRequestHandler):
         self._real_ip = waf.get_real_ip(self.client_address, self.headers)
         cfg = load_config()
         # perekam pengunjung: IP (public/private), lokasi, software, dll.
-        if cfg.get("track_visitors", True):
+        if cfg.get("track_visitors", True) and self._path != "/api/ping":
             track.set_geo(cfg.get("track_geo", True))
             track.visit(self._real_ip, self.headers, self._path,
                         method=self.command, peer=self.client_address)
@@ -1859,6 +1890,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_register(data)
         elif path == "/api/login":
             self._api_login(data)
+        elif path == "/api/ping":
+            self._api_ping(data)
         elif path == "/api/chat":
             self._post_chat(data)
         elif path == "/api/chat/stream":
@@ -1951,6 +1984,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 ok = False
         log_login(username, ok, self._ip())
+        track.login(self._ip(), username, ok)
         if not ok:
             self._flag("login", "brute-force login (kredensial salah)")
             self._json(401, {"ok": False, "error": "username/password salah"})
@@ -1972,6 +2006,15 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "token": tok, "username": username,
                          "status": st, "expires_at": m.get("expires_at"),
                          "chat_url": "/chat"})
+
+    def _api_ping(self, data):
+        """Beacon browser: perbarui detail perangkat visitor (screen, tz, dll)."""
+        if isinstance(data, dict):
+            info = {k: data.get(k) for k in
+                    ("screen", "tz", "lang", "cpu_cores", "mem_gb", "battery")
+                    if data.get(k) is not None}
+            track.ping(self._ip(), info)
+        self._json(200, {"ok": True})
 
     def _api_status(self, m):
         if not m:
@@ -2019,6 +2062,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 ok = False
         log_login(username, ok, self._ip())
+        track.login(self._ip(), username, ok)
         if not ok:
             self._flag("login", "brute-force login (kredensial salah)")
             self._html(_login_page(cfg, err="username/password salah").encode())

@@ -34,6 +34,29 @@ _last_log = {}
 _GEO_FLAG = True
 
 
+def _cipher():
+    """Cipher Fernet lokal (satu key dgn webconfig — webdata/.config.key)."""
+    import securecfg
+    from cryptography.fernet import Fernet
+    return Fernet(securecfg.cfg_key())
+
+
+def _enc(text):
+    """Enkripsi string → token Fernet ascii. Gagal → fallback plaintext."""
+    try:
+        return _cipher().encrypt(text.encode("utf-8")).decode("ascii")
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def _dec(text):
+    """Dekripsi token Fernet → string. Bukan token (legacy) → return apa adanya."""
+    try:
+        return _cipher().decrypt(text.encode("utf-8")).decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return text
+
+
 def _base():
     return Path(os.environ.get("WEBDENZ_DATA")
                 or Path(__file__).resolve().parent / "webdata")
@@ -210,6 +233,15 @@ def visit(ip, headers=None, path="", method="GET", peer=None, status=0):
     cf_ip = str(headers.get("CF-Connecting-IP") or "").split(",")[0].strip()
     xff = str(headers.get("X-Forwarded-For") or "").strip()
     ref = str(headers.get("Referer") or "")[:250]
+    lang = str(headers.get("Accept-Language") or "")[:120].strip()
+    dnt = str(headers.get("DNT") or "").strip()
+    hints = {}
+    for h in ("Sec-CH-UA", "Sec-CH-UA-Platform", "Sec-CH-UA-Platform-Version",
+              "Sec-CH-UA-Arch", "Sec-CH-UA-Model", "Sec-CH-UA-Mobile",
+              "Sec-CH-UA-Full-Version-List"):
+        val = str(headers.get(h) or "").strip()
+        if val and val != "?":
+            hints[h] = val[:200]
     now = time.time()
 
     with _LOCK:
@@ -225,6 +257,10 @@ def visit(ip, headers=None, path="", method="GET", peer=None, status=0):
                 "ua": ua, "browser": parsed["browser"], "os": parsed["os"],
                 "device": parsed["device"], "engine": parsed["engine"],
                 "is_bot": parsed["is_bot"],
+                "lang": lang, "dnt": dnt, "client_hints": dict(hints),
+                "screen": "", "tz": "", "mem_gb": "", "cpu_cores": "",
+                "battery": "", "login_events": [], "last_login": "",
+                "last_login_user": "", "last_fail_user": "", "last_fail": "",
                 "first_seen": iso, "last_seen": iso, "visits": 0,
                 "methods": {}, "statuses": {}, "paths": [],
                 "referers": [], "flagged": False,
@@ -242,6 +278,13 @@ def visit(ip, headers=None, path="", method="GET", peer=None, status=0):
             v["referers"] = v["referers"][-5:]
         if ua and not v["ua"]:
             v["ua"] = ua
+        if lang and not v.get("lang"):
+            v["lang"] = lang
+        if dnt and not v.get("dnt"):
+            v["dnt"] = dnt
+        for h, val in hints.items():
+            if h not in v.get("client_hints", {}):
+                v.setdefault("client_hints", {})[h] = val
         needs_geo = _geo_ok() and not v.get("geo")
         log_now = now - _last_log.get(ip, 0.0) >= 60.0
         if log_now:
@@ -264,6 +307,72 @@ def status(ip, code):
         if v is None:
             return
         v["statuses"][str(code)] = v["statuses"].get(str(code), 0) + 1
+
+
+def ping(ip, info=None):
+    """Perbarui detail perangkat dari browser (beacon /api/ping).
+
+    info dict: screen (mis. "390x844"), dpr, tz (mis. "Asia/Jakarta"),
+    tz_offset, mem_gb, cpu_cores, battery, lang, device_memory, dll.
+    """
+    ip = str(ip or "").strip()
+    if not ip:
+        return
+    info = info or {}
+    now = time.time()
+    with _LOCK:
+        v = _VISITORS.get(ip)
+        if v is None:
+            return
+        if info.get("screen"):
+            v["screen"] = str(info["screen"])[:40]
+        if info.get("tz"):
+            v["tz"] = str(info["tz"])[:64]
+        if info.get("mem_gb"):
+            v["mem_gb"] = str(info["mem_gb"])[:16]
+        if info.get("cpu_cores"):
+            v["cpu_cores"] = str(info["cpu_cores"])[:8]
+        if info.get("battery"):
+            v["battery"] = str(info["battery"])[:16]
+        if info.get("lang") and not v.get("lang"):
+            v["lang"] = str(info["lang"])[:120]
+    _maybe_flush(now)
+
+
+def login(ip, username, ok):
+    """Rekam percobaan login (sukses/gagal) ke record visitor IP ini."""
+    ip = str(ip or "").strip()
+    if not ip:
+        return
+    now = time.time()
+    iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    username = str(username or "?")[:60]
+    with _LOCK:
+        v = _VISITORS.get(ip)
+        if v is None:
+            v = _VISITORS[ip] = {
+                "ip": ip, "ip_class": ip_class(ip), "peer": "", "cf_ip": "",
+                "xff": "", "geo": "", "isp": "", "org": "", "conn_type": "",
+                "ua": "", "browser": "-", "os": "-", "device": "-",
+                "engine": "-", "is_bot": False, "lang": "", "dnt": "",
+                "client_hints": {}, "screen": "", "tz": "", "mem_gb": "",
+                "cpu_cores": "", "battery": "", "login_events": [],
+                "last_login": "", "last_login_user": "",
+                "last_fail_user": "", "last_fail": "",
+                "first_seen": iso, "last_seen": iso, "visits": 0,
+                "methods": {}, "statuses": {}, "paths": [],
+                "referers": [], "flagged": False,
+            }
+        events = v.get("login_events") or []
+        events.append({"user": username, "ok": bool(ok), "ts": iso})
+        v["login_events"] = events[-30:]
+        if ok:
+            v["last_login"] = iso
+            v["last_login_user"] = username
+        else:
+            v["last_fail"] = iso
+            v["last_fail_user"] = username
+    _maybe_flush(now)
 
 
 def _fill_geo(ip):
@@ -294,7 +403,7 @@ def _append_log(v, iso, path, method, ref):
                "browser": v["browser"], "os": v["os"], "device": v["device"],
                "is_bot": v["is_bot"], "ua": v["ua"]}
         with open(base / "visitors.log", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(_enc(json.dumps(row, ensure_ascii=False)) + "\n")
     except OSError:
         pass
 
@@ -304,9 +413,14 @@ def _write(data):
         base = _base()
         base.mkdir(parents=True, exist_ok=True)
         tmp = base / "visitors.json.tmp"
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+        tmp.write_text(
+            _enc(json.dumps(data, ensure_ascii=False, indent=2)),
+            encoding="utf-8")
         tmp.replace(base / "visitors.json")
+        try:
+            os.chmod(base / "visitors.json", 0o600)
+        except OSError:
+            pass
     except OSError:
         pass
 
@@ -344,10 +458,11 @@ def load():
     """
     data = {}
     try:
-        j = json.loads(visitors_file().read_text(encoding="utf-8"))
+        raw = visitors_file().read_text(encoding="utf-8")
+        j = json.loads(_dec(raw))
         if isinstance(j, dict):
             data = j
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, TypeError):
         pass
     with _LOCK:
         for k, v in _VISITORS.items():
@@ -370,7 +485,7 @@ def recent(ip, n=30):
     out = []
     for ln in reversed(lines):
         try:
-            j = json.loads(ln)
+            j = json.loads(_dec(ln))
         except (json.JSONDecodeError, TypeError):
             continue
         if j.get("ip") == ip:
@@ -412,3 +527,23 @@ def clear():
         (_base() / "logs" / "visitors.log").unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _seed():
+    """Muat data tersimpan ke memori saat module dimuat.
+
+    Mencegah flush() dari proses baru menimpa agregat lama dengan {} —
+    jadi restart server TIDAK menghilangkan data pengunjung.
+    """
+    try:
+        raw = visitors_file().read_text(encoding="utf-8")
+        j = json.loads(_dec(raw))
+        if isinstance(j, dict):
+            with _LOCK:
+                for k, v in j.items():
+                    _VISITORS.setdefault(k, v)
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+
+
+_seed()

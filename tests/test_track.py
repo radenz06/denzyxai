@@ -113,7 +113,10 @@ class TestVisit:
         assert v["browser"] == "Chrome"
         assert v["os"] == "Android"
         assert v["device"] == "mobile"
-        assert v["first_seen"] == v["last_seen"]
+        import datetime as _dt
+        f = _dt.datetime.strptime(v["first_seen"], "%Y-%m-%d %H:%M:%S")
+        l = _dt.datetime.strptime(v["last_seen"], "%Y-%m-%d %H:%M:%S")
+        assert (l - f).total_seconds() <= 5  # rentang kunjungan singkat
         assert v["methods"].get("POST") == 2
         assert v["methods"].get("GET") == 1
         assert v["statuses"].get("200") == 1
@@ -131,9 +134,11 @@ class TestVisit:
         tr.visit("203.0.113.9", {"User-Agent": "Mozilla/5.0 Chrome/126"}, "/")
         tr.flush()
         raw = tr.visitors_file().read_text(encoding="utf-8")
-        assert "203.0.113.9" in raw
+        assert "203.0.113.9" not in raw  # data terenkripsi, bukan plaintext
         log = (tr.visitors_file().parent / "logs" / "visitors.log")
-        assert "203.0.113.9" in log.read_text(encoding="utf-8")
+        assert "203.0.113.9" not in log.read_text(encoding="utf-8")
+        assert tr.get("203.0.113.9")
+        assert tr.recent("203.0.113.9")
 
     def test_recent_log(self, tr):
         tr.visit("203.0.113.10", {"User-Agent": "curl/8.5"}, "/wp-login.php",
@@ -160,6 +165,27 @@ class TestVisit:
         assert s["mobile"] == 1
         assert s["today"] >= 1
 
+    def test_ping_updates_device_info(self, tr):
+        tr.visit("203.0.113.20", {"User-Agent": "Mozilla/5.0 Chrome/126"}, "/")
+        tr.ping("203.0.113.20", {"screen": "390x844", "tz": "Asia/Jakarta",
+                                 "mem_gb": 8, "cpu_cores": 8, "battery": 87})
+        v = tr.get("203.0.113.20")
+        assert v["screen"] == "390x844"
+        assert v["tz"] == "Asia/Jakarta"
+        assert v["mem_gb"] == "8"
+        assert v["cpu_cores"] == "8"
+        assert v["battery"] == "87"
+
+    def test_login_tracking(self, tr):
+        tr.visit("203.0.113.21", {"User-Agent": "curl"}, "/login")
+        tr.login("203.0.113.21", "denz", ok=True)
+        tr.login("203.0.113.21", "hacker", ok=False)
+        v = tr.get("203.0.113.21")
+        assert v["last_login_user"] == "denz"
+        assert v["last_fail_user"] == "hacker"
+        assert [e["user"] for e in v["login_events"]] == ["denz", "hacker"]
+        assert [e["ok"] for e in v["login_events"]] == [True, False]
+
     def test_clear(self, tr):
         tr.visit("203.0.113.14", {"User-Agent": "curl"}, "/")
         tr.flush()
@@ -167,3 +193,13 @@ class TestVisit:
         tr.clear()
         assert not tr.get("203.0.113.14")
         assert not tr.visitors_file().exists()
+
+    def test_seed_preserves_data_on_reload(self, tr):
+        tr.visit("203.0.113.30", {"User-Agent": "curl"}, "/")
+        tr.flush()
+        import importlib
+        importlib.reload(tr)
+        v = tr.get("203.0.113.30")  # tanpa kunjungan baru
+        assert v and v["visits"] == 1
+        tr.flush()
+        assert tr.get("203.0.113.30")  # flush proses baru tidak menghapus
