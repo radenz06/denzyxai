@@ -1548,6 +1548,72 @@ class Handler(BaseHTTPRequestHandler):
     def _ip(self):
         return getattr(self, "_real_ip", str(self.client_address[0]))
 
+    def _reg_notify(self, username, display):
+        """Notifikasi registrasi detail ke owner TG (thread background).
+
+        Merangkum IP publik/private + peer, geolokasi & ISP, perangkat/
+        software (dari User-Agent), dan waktu lengkap (tanggal-jam-tahun).
+        Non-blocking: geolokasi & kirim pesan jalan di thread terpisah.
+        """
+        import track as _track
+
+        def _build():
+            ip = self._ip()
+            peer = str(self.client_address[0])
+            ua = self.headers.get("User-Agent", "")
+            p = _track.parse_ua(ua)
+            cls = _track.ip_class(ip)
+            cls_label = {"public": "Publik", "private": "Private",
+                         "loopback": "Loopback", "invalid": "?"}.get(
+                             cls, cls)
+            now = time.strftime("%a, %d %b %Y %H:%M:%S", time.localtime())
+            tz = time.strftime("%Z") or "WIB"
+            bits = [b for b in (p["browser"], p["os"], p["device"]) if b != "-"]
+            dev = " · ".join(bits) or "-"
+            bot = "YA 🤖" if p["is_bot"] else "Tidak"
+            ref = str(self.headers.get("Referer") or "-")[:200]
+            lines = [
+                "📝 REGISTRASI BARU",
+                f"👤 Username : {username}",
+                f"🪪 Nama     : {display or '-'}",
+                f"🕐 Waktu    : {now} ({tz})",
+                "",
+                f"🌐 IP Publik: {ip}  [ {cls_label} ]",
+                f"🖧 Peer     : {peer}",
+                f"🛡 CF-IP    : {self.headers.get('CF-Connecting-IP') or '-'}",
+                f"➡ XFF      : {self.headers.get('X-Forwarded-For') or '-'}",
+                "",
+                f"💻 Software : {dev}",
+                f"🔍 Engine   : {p['engine'] or '-'}",
+                f"🤖 Bot      : {bot}",
+                f"🔗 Referer  : {ref}",
+            ]
+            # lokasi & ISP (geolokasi IP publik, non-blocking)
+            if _track._geo_ok():
+                geo = waf.geo_info(ip) or {}
+                loc = geo.get("loc") or "-"
+                isp = geo.get("isp") or "-"
+                org = geo.get("org") or "-"
+                conn = geo.get("type") or "-"
+                if loc != "-":
+                    lines.insert(7, f"📍 Lokasi   : {loc}")
+                lines.insert(8, f"🏢 ISP      : {isp}")
+                if org and org != isp:
+                    lines.insert(9, f"🗄 Org      : {org}")
+                lines.insert(10, f"🔌 Tipe     : {conn}")
+            lines.append("")
+            lines.append("⚠️ Cek owner panel untuk aktivasi.")
+            return "\n".join(lines)
+
+        def _send():
+            try:
+                from denzbot import tg_notify
+                tg_notify(_build())
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_send, daemon=True).start()
+
     # --- waf / keamanan ---
     def _prelude(self):
         """Set state per-request: IP asli, path, guard WAF dasar.
@@ -1847,8 +1913,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "username sudah dipakai"})
             return
         create_member(username, password, display, self._ip())
-        from denzbot import tg_notify
-        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self._ip()}. Cek owner panel untuk aktivasi.")
+        self._reg_notify(username, display)
         m = load_member(username)
         self._json(200, {"ok": True, "username": username,
                          "status": member_status(m),
@@ -1977,8 +2042,7 @@ class Handler(BaseHTTPRequestHandler):
             self._html(_register_page(cfg, err="username sudah dipakai").encode())
             return
         create_member(username, password, display, self._ip())
-        from denzbot import tg_notify
-        tg_notify(f"📝 REGISTRASI baru: {username} ({display}) — IP {self._ip()}. Cek owner panel untuk aktivasi.")
+        self._reg_notify(username, display)
         m = load_member(username)
         self._html(_register_page(
             cfg, msg=f"Berhasil daftar, {username}.", m=m).encode())

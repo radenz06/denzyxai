@@ -721,6 +721,40 @@ class TestHTTP:
             srv.shutdown()
             t.join(timeout=3)
 
+    def test_reg_notify_detail(self, wd, monkeypatch):
+        """Notifikasi registrasi berisi detail IP/software/waktu (bukan cuma IP)."""
+        import webdenz
+        h = object.__new__(webdenz.Handler)
+        h.client_address = ("2001:448a:3071:1386:22ea:9ca1:8f9d:e5fd", 4321)
+        h._real_ip = "2001:448a:3071:1386:22ea:9ca1:8f9d:e5fd"
+        h.headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 14; SM-A156E) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0.0.0 Mobile Safari/537.36",
+            "CF-Connecting-IP": "2001:448a:3071:1386:22ea:9ca1:8f9d:e5fd",
+            "X-Forwarded-For": "10.0.0.5, 2001:448a:3071:1386:22ea:9ca1:8f9d:e5fd",
+            "Referer": "https://t.me/c/12345/100",
+        }
+        import denzbot
+        captured = []
+        monkeypatch.setattr(denzbot, "tg_notify", lambda text: captured.append(text))
+        h._reg_notify("pett", "test")
+        for _ in range(100):
+            if captured:
+                break
+            import time
+            time.sleep(0.1)
+        assert captured, "notifikasi tidak terkirim"
+        msg = captured[0]
+        assert "REGISTRASI BARU" in msg
+        assert "pett" in msg and "test" in msg
+        assert "2001:448a" in msg  # IP
+        assert "Chrome" in msg and "Android" in msg  # software/hardware
+        assert "mobile" in msg  # device
+        assert "Waktu" in msg and "2026" in msg  # tanggal/jam/tahun
+        assert "Referer" in msg
+        assert "Cek owner panel" in msg
+
 
 class TestVisitors:
     """Test panel pengunjung (helpers sendiri — jangan subclass TestHTTP,

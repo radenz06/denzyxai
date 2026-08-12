@@ -4,6 +4,17 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.2] - 2026-08-12
+
+### Ditambahkan
+- **Notifikasi registrasi TG detail** (`_reg_notify`): tak lagi cuma IP —
+  kini berisi username/nama, tanggal-jam-tahun + zona waktu, IP publik
+  (klasifikasi Publik/Private/Loopback), IP peer + CF-IP + rantai XFF,
+  software/perangkat dari User-Agent (browser · OS · device · engine),
+  status bot, referer, dan geolokasi + ISP (lokasi, org, tipe koneksi).
+  Dikirim di thread background (tidak memperlambat response).
+- Regression test `test_reg_notify_detail`.
+
 ## [3.3.1] - 2026-08-12
 
 ### Diperbaiki
