@@ -39,6 +39,18 @@ def _now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _owner_contact():
+    """Kontak owner dari config — fallback teks umum."""
+    try:
+        import webdenz
+        uname = (webdenz.load_config().get("tg_owner_username") or "").strip()
+        if uname:
+            return f"t.me/{uname}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "owner"
+
+
 def login(username, password):
     """Verifikasi kredensial. Return dict role/status, atau None kalau
     username/password tidak dikenali."""
@@ -188,7 +200,7 @@ def require_terminal(owner_only=False):
     info = login(username, password)
     if info is None:
         _reject("✖ Bukan member. Minta link registrasi ke Telegram: "
-                "t.me/colipopi", 1)
+                + _owner_contact(), 1)
     if info.get("status") == "owner_bootstrap":
         # owner belum punya password → buat sekarang (first-run)
         ok, msg = _bootstrap_owner(username)
@@ -200,9 +212,9 @@ def require_terminal(owner_only=False):
         return True
     if info["status"] != "active":
         msgs = {"pending": "✖ Akun menunggu konfirmasi pembayaran — "
-                           "hubungi Telegram t.me/colipopi.",
+                           "hubungi Telegram " + _owner_contact() + ".",
                 "expired": "✖ Langganan kedaluwarsa — perpanjang lewat "
-                           "t.me/colipopi.",
+                           + _owner_contact() + ".",
                 "banned": "✖ Akun diblokir (banned)."}
         _reject(msgs.get(info["status"], "✖ Status tidak aktif."), 1)
     if owner_only and info["role"] != "owner":

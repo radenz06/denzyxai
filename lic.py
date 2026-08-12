@@ -36,8 +36,8 @@ TOKEN_PATH = Path(os.environ.get("WEBDENZ_TOKEN")
 
 # default hash + salt (fallback bila webconfig.json belum punya lisensi).
 # Ter-obfuscate: bukan password, tapi hash — tidak bisa dibalik jadi password.
-_DEFAULT_SALT = 'Oz48O29sbG1iaDg+OTk4PGxvbzw5YmNsYmw5a2hvODs='
-_DEFAULT_DIGEST = 'a208Yjhsajk+a2NvYm9jYzhuP288OTlpOD9tPjttY25jYzg5YmI/ams+PDk8bT4+aDhrbGpobD5tPGw/PD5sOw=='
+_DEFAULT_SALT = 'YzxpaWk7PmI8aW47a2xsaz5obmk7Y2M5a2o5aGNjP24='
+_DEFAULT_DIGEST = 'aW88OGhobm1oPmk5PGs8bmJiajlrOzxiYz5tbm9qa2lrO2w/O2w4aG47PGlvam8+PG9rPmxrP29qbGltOTtrPw=='
 
 
 def _xor(s):

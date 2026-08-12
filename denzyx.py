@@ -242,9 +242,12 @@ def find_opencode_key():
     return None
 
 
-def resolve_key(direct, api_key=None):
+def resolve_key(direct, api_key=None, base_url=None):
     if api_key:
         return api_key
+    # endpoint custom (member sendiri): jangan bocorkan key default server
+    if base_url:
+        return None
     env = os.environ.get("OPENCODE_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if env:
         return env
@@ -261,6 +264,7 @@ class State:
         self.direct = False
         self.model = _obf("Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==")
         self.api_key = None
+        self.base_url = None
         self.temperature = 1.0
         self.max_tokens = 8192
         self.show_reasoning = True
@@ -278,6 +282,8 @@ class State:
 
     @property
     def url(self):
+        if self.base_url:
+            return self.base_url
         return DIRECT_URL if self.direct else ZEN_URL
 
     @property
@@ -290,7 +296,7 @@ class State:
     def key(self):
         # dibaca FRESH tiap request -> key terbaru langsung kepakai
         # langsung kepakai tanpa restart app
-        k = resolve_key(self.direct, self.api_key)
+        k = resolve_key(self.direct, self.api_key, self.base_url)
         if k != self._last_key:
             self._last_key = k
             self._key_changed = True
@@ -426,7 +432,8 @@ def _api_stream(state, msgs, tools, out_queue, stop_evt=None, timeout=180,
                 resp = open_req(state.key)
             except urllib.error.HTTPError as e:
                 # key ditolak -> auto fallback ke public (FREE)
-                if e.code in (401, 403) and not state.direct:
+                # (tidak untuk endpoint custom: key member milik endpoint itu)
+                if e.code in (401, 403) and not state.direct and not state.base_url:
                     state._used_public = True
                     resp = open_req("public")
                 else:
@@ -2061,11 +2068,18 @@ def export_chat(state):
     return fname
 
 
-# Telegram untuk laporan bug (t.me/colipopi)
-BUG_URL = ("https://t.me/colipopi?text="
-           "Halo%20DENZYX%2C%20saya%20menemukan%20bug%20di%20aplikasi"
-           "%20denzyx%20AI")
-BUG_LABEL = "t.me/colipopi"
+def _bug_contact():
+    """Link laporan bug ke owner (dari config) — fallback teks umum."""
+    import webdenz
+    try:
+        uname = (webdenz.load_config().get("tg_owner_username") or "").strip()
+        if uname:
+            return ("https://t.me/" + uname + "?text=Halo%20DENZYX%2C"
+                    "%20saya%20menemukan%20bug%20di%20aplikasi%20denzyx%20AI",
+                    f"t.me/{uname}")
+    except Exception:  # noqa: BLE001
+        pass
+    return None, "owner"
 
 
 def open_url(url):
@@ -4342,14 +4356,15 @@ def main_menu(stdscr, state):
             elif sel == 5:
                 about_screen(stdscr)
             elif sel == 6:
-                ok, err = open_url(BUG_URL)
+                bug_url, bug_label = _bug_contact()
+                ok, err = open_url(bug_url)
                 if ok:
                     input_line(stdscr,
-                               f" Membuka Telegram — {BUG_LABEL}"
+                               f" Membuka Telegram — {bug_label}"
                                " (Enter: kembali) ")
                 else:
                     input_line(stdscr,
-                               f" Telegram: {BUG_LABEL} — {err}"
+                               f" Telegram: {bug_label} — {err}"
                                " (Enter) ")
             elif sel == 7:
                 # keluar dulu dari curses, jalankan owner panel, lalu balik

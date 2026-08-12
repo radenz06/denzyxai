@@ -14,6 +14,7 @@
 """
 
 import json
+import hashlib
 import re
 import sys
 import time
@@ -45,14 +46,16 @@ def tg_api(token, method, payload=None, timeout=20):
         return {"ok": False, "description": str(e)}
 
 
-def tg_send(chat_id, text, token=None):
+def tg_send(chat_id, text, token=None, reply_markup=None):
     cfg = webdenz.load_config()
     token = token or cfg.get("tg_bot_token")
     if not token or not chat_id:
         return {"ok": False, "description": "token/chat_id belum dikonfigurasi"}
-    return tg_api(token, "sendMessage",
-                  {"chat_id": str(chat_id), "text": str(text)[:4000],
-                   "disable_web_page_preview": True})
+    payload = {"chat_id": str(chat_id), "text": str(text)[:4000],
+               "disable_web_page_preview": True}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return tg_api(token, "sendMessage", payload)
 
 
 def tg_send_photo(chat_id, photo, caption="", token=None):
@@ -98,6 +101,25 @@ def tg_notify(text):
         except Exception:  # noqa: BLE001
             return {"ok": False, "description": "tg_notify error"}
     return {"ok": False, "description": "not configured"}
+
+
+def tg_get_file(token, file_id):
+    """Download file dari Telegram (foto bukti) → return bytes atau None."""
+    if not token or not file_id:
+        return None
+    r = tg_api(token, "getFile", {"file_id": file_id})
+    if not r.get("ok"):
+        return None
+    path = (r.get("result") or {}).get("file_path")
+    if not path:
+        return None
+    try:
+        url = f"https://api.telegram.org/file/bot{token}/{path}"
+        req = urllib.request.Request(url, headers={"User-Agent": "denzbot"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +298,44 @@ def _cmd_block(_cfg, arg):
     return f"⛔ IP {ip} diblokir permanen. Unban: /unbanip {ip}"
 
 
+def _menu_keyboard():
+    """Inline keyboard menu owner (rapih + tombol)."""
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 Status", "callback_data": "/status"},
+             {"text": "👥 Members", "callback_data": "/members"}],
+            [{"text": "📋 Logs", "callback_data": "/logs"},
+             {"text": "🚫 Bans", "callback_data": "/bans"}],
+            [{"text": "➕ Add Member", "callback_data": "/addmember"},
+             {"text": "👑 Admin", "callback_data": "/addadmin"}],
+            [{"text": "🗂 Menu", "callback_data": "/menu"}],
+        ]
+    }
+
+
+def _cmd_menu(cfg):
+    """Menu utama owner — tombol inline, rapih & terstruktur."""
+    lines = [
+        "🗂 MENU OWNER — denzyx AI",
+        "",
+        "👥 Kelola member:",
+        "  /status  /members  /member <user>  /logs",
+        "",
+        "💰 Langganan:",
+        "  /addmember <user> <pass> [hari]",
+        "  /activate <user>  (approve bukti)",
+        "  /reject <user>  /extend <user> <hari>",
+        "  /addadmin <user>  /rmadmin <user>",
+        "",
+        "🛡 Keamanan:",
+        "  /bans  /unbanip <ip>  /block <ip>",
+        "  /ban <user>  /unban <user>",
+        "",
+        "Ketuk tombol di bawah untuk jalan cepat ⬇️",
+    ]
+    return "\n".join(lines)
+
+
 _HANDLERS = {
     "/status": _cmd_status,
     "/members": _cmd_members,
@@ -284,6 +344,7 @@ _HANDLERS = {
     "/bans": _cmd_bans,
     "/unbanip": _cmd_unbanip,
     "/block": _cmd_block,
+    "/menu": _cmd_menu,
     "/ban": lambda c, a: _cmd_set_member("ban", a),
     "/unban": lambda c, a: _cmd_set_member("unban", a),
     "/activate": lambda c, a: _cmd_set_member("activate", a),
@@ -358,10 +419,131 @@ def _send_qr(m, chat_id):
     return "Gagal kirim QR: " + str(r.get("description"))[:120]
 
 
-def handle_member_message(chat_id, text="", has_photo=False, caption=""):
+def _idr(n):
+    """Format Rupiah gaya Indonesia: 20000 → '20.000'."""
+    try:
+        return f"{int(n):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return str(n)
+
+
+def _member_password(m):
+    """Password member (decrypt) untuk dikirim ke pembeli — None bila gagal."""
+    try:
+        return webdenz.dec_secret(m.get("password") or "")
+    except Exception:  # noqa: BLE001
+        return "(password tidak terbaca, minta ke owner)"
+
+
+def _verify_payment_proof(username, image_bytes, chat_id, token):
+    """OCR + parse nominal bukti pembayaran.
+
+    Logika:
+    • Nominal >= harga (price_idr) → aktivasi otomatis + kirim username/password.
+    • Nominal kurang → nominal diakumulasi, sisa ditagih ke member
+      (mengirim 15.000 dari 20.000 → ditagih 5.000; kirim lagi 5.000 → aktif).
+    • Nominal tak terbaca / OCR gagal → terusan ke owner untuk /activate manual.
+
+    Return reply untuk member.
+    """
+    import payocr
+    cfg = webdenz.load_config()
+    price = int(cfg.get("price_idr") or 0)
+    text, oerr = payocr.ocr_image(image_bytes)
+    report = payocr.verify_payment(text, price)
+    m = webdenz.load_member(username)
+    if not m:
+        return "Username tidak ditemukan. Sudah daftar di web dulu, ya? 😊"
+
+    amount = report.get("amount")
+    if report["ok"] and webdenz.member_status(m) != "active":
+        webdenz.log_activity("activate_auto", username)
+        _cmd_set_member("activate", username)
+        m = webdenz.load_member(username)
+        m["paid"] = 0
+        m["last_proof_hash"] = None
+        webdenz.save_member(m)
+        pw = _member_password(m)
+        tg_notify(f"🎉 AUTO-AKTIVASI via OCR bukti:\n"
+                  f"• Member: {username}\n"
+                  f"• Nominal: Rp {_idr(report['amount'])} "
+                  f"(cocok harga Rp {_idr(price)})\n"
+                  f"• Baris OCR: {report['line'] or '-'}")
+        return (f"✅ Pembayaran berhasil, silahkan login!\n\n"
+                f"username: {username}\n"
+                f"password: {pw}\n\n"
+                f"Langganan aktif s/d {m.get('expires_at')}")
+    if report["ok"]:
+        return "✅ Bukti terverifikasi. Akun sudah aktif sebelumnya."
+
+    # nominal terbaca tapi kurang → akumulasi + tagih sisa
+    if amount is not None and price:
+        proof_hash = _proof_hash(text)
+        if m.get("last_proof_hash") == proof_hash:
+            return (f"⚠️ Bukti yang sama sudah dicatat sebelumnya.\n"
+                    f"Sudah terkumpul Rp {_idr(m.get('paid', 0))} "
+                    f"dari Rp {_idr(price)}.\n"
+                    f"Kurang: Rp {_idr(max(0, price - int(m.get('paid', 0))))}")
+        m["paid"] = int(m.get("paid") or 0) + amount
+        m["last_proof_hash"] = proof_hash
+        webdenz.save_member(m)
+        # terkumpul sudah lunas → auto-aktif
+        if m["paid"] >= price:
+            webdenz.log_activity("activate_auto", username)
+            _cmd_set_member("activate", username)
+            m = webdenz.load_member(username)
+            m["paid"] = 0
+            m["last_proof_hash"] = None
+            webdenz.save_member(m)
+            pw = _member_password(m)
+            tg_notify(f"🎉 AUTO-AKTIVASI via OCR (lunas parsial):\n"
+                      f"• Member: {username}\n"
+                      f"• Total terkumpul: Rp {_idr(price)} (LUNAS)\n"
+                      f"• Baris OCR: {report['line'] or '-'}")
+            return (f"✅ Pembayaran berhasil, silahkan login!\n\n"
+                    f"username: {username}\n"
+                    f"password: {pw}\n\n"
+                    f"Langganan aktif s/d {m.get('expires_at')}")
+        shortage = max(0, price - int(m["paid"]))
+        tg_notify(f"💰 TAGIHAN SISA dari {username}\n"
+                  f"Chat id: {chat_id}\n"
+                  f"• Terbaca: Rp {_idr(amount)}\n"
+                  f"• Terkumpul: Rp {_idr(m['paid'])} dari Rp {_idr(price)}\n"
+                  f"• Sisa tagihan: Rp {_idr(shortage)}\n"
+                  f"• Baris OCR: {report['line'] or '-'}")
+        webdenz.log_activity("bukti_parsial", username)
+        return (f"💰 Nominal belum lengkap.\n"
+                f"• Terbaca: Rp {_idr(amount)}\n"
+                f"• Terkumpul: Rp {_idr(m['paid'])}\n"
+                f"• Harga: Rp {_idr(price)}\n"
+                f"• KURANG: Rp {_idr(shortage)}\n\n"
+                f"Transfer sisanya (Rp {_idr(shortage)}) lalu kirim bukti lagi ya 🙏")
+
+    # nominal tak terbaca / OCR gagal → terusan manual ke owner
+    ocr_line = report.get("line") or "-"
+    det = (f"Rp {_idr(report['amount'])}" if report["amount"] else "tidak terbaca")
+    tg_notify(f"🧾 BUKTI PEMBAYARAN dari {username}\n"
+              f"Chat id: {chat_id}\n"
+              f"• OCR nominal: {det} (harga: Rp {_idr(price)})\n"
+              f"• Baris OCR: {ocr_line}\n"
+              f"• OCR error: {oerr or '-'}\n"
+              f"Reply: /activate {username}")
+    webdenz.log_activity("bukti", username)
+    return ("📥 Bukti terkirim ke owner. "
+            "Begitu dikonfirmasi, akun kamu langsung aktif. "
+            "Nanti kamu terima notifikasi di sini 👍")
+
+
+def _proof_hash(text):
+    """Fingerprint teks OCR untuk anti double-credit bukti yang sama."""
+    return hashlib.sha256((text or "").strip().encode("utf-8")).hexdigest()
+
+
+def handle_member_message(chat_id, text="", has_photo=False, caption="", photo_id=None):
     """Tangani pesan dari member/pembeli (bukan owner).
 
-    Alur: chat bot → bot kirim QR → kirim bukti → owner konfirmasi → aktif.
+    Alur: chat bot → bot kirim QR → kirim bukti → OCR verifikasi →
+    cocok harga → auto-aktivasi; tidak cocok → owner konfirmasi manual.
     """
     cfg = webdenz.load_config()
     m = _member_tg(chat_id)
@@ -389,6 +571,11 @@ def handle_member_message(chat_id, text="", has_photo=False, caption=""):
 
     if has_photo:
         webdenz.log_activity("bukti", m.get("username"))
+        if photo_id:
+            image = tg_get_file(cfg.get("tg_bot_token"), photo_id)
+            if image:
+                return _verify_payment_proof(m.get("username"), image,
+                                             chat_id, cfg.get("tg_bot_token"))
         tg_notify(f"🧾 BUKTI PEMBAYARAN dari {m.get('username')} "
                   f"({m.get('display_name')})\n"
                   f"Chat id: {chat_id}\n"
@@ -504,6 +691,19 @@ def handle_message(text):
         return fn(cfg)
     except Exception as e:  # noqa: BLE001
         return f"error: {e}"
+
+
+def handle_callback(callback_data, owner_id):
+    """Respon tombol inline /menu → eksekusi perintah owner."""
+    cmd = (callback_data or "").strip()
+    if not cmd:
+        return None, None
+    try:
+        reply = handle_message(cmd)
+    except Exception as e:  # noqa: BLE001
+        reply = f"error: {e}"
+    markup = _menu_keyboard() if cmd == "/menu" else None
+    return reply, markup
 
 
 def poll_once(token, offset):
@@ -629,11 +829,30 @@ def run_bot(stop_evt=None, verbose=True):
             text = msg.get("text") or ""
             has_photo = bool(msg.get("photo"))
             caption = msg.get("caption") or ""
+            # --- callback tombol inline (/menu) ---
+            cb = u.get("callback_query") or {}
+            if cb:
+                cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
+                cb_from = str(((cb.get("from") or {}).get("id") or ""))
+                if cb_chat == owner_id:
+                    reply, markup = handle_callback(cb.get("data"), owner_id)
+                    if reply:
+                        tg_send(owner_id, reply, reply_markup=markup)
+                    try:
+                        tg_api(cfg.get("tg_bot_token"), "answerCallbackQuery",
+                               {"callback_query_id": cb.get("id", "")})
+                    except Exception:  # noqa: BLE001
+                        pass
+                continue
             if chat_id == owner_id:
                 if not text:
                     continue
-                reply = handle_message(text)
-                tg_send(owner_id, reply)
+                if text.split()[0].split("@")[0].lower() == "/menu":
+                    reply = handle_message(text)
+                    tg_send(owner_id, reply, reply_markup=_menu_keyboard())
+                else:
+                    reply = handle_message(text)
+                    tg_send(owner_id, reply)
                 continue
             # --- member / admin (reseller) / calon member ---
             sender = _member_tg(chat_id)
@@ -642,11 +861,13 @@ def run_bot(stop_evt=None, verbose=True):
                 tg_send(chat_id, reply)
                 continue
             if sender:
-                reply = handle_member_message(chat_id, text, has_photo, caption)
-                tg_send(chat_id, reply)
-                if has_photo:
-                    # forward foto bukti ke owner
+                photo = ""
+                if has_photo and msg.get("photo"):
                     photo = msg["photo"][-1]["file_id"]
+                reply = handle_member_message(chat_id, text, has_photo, caption, photo)
+                tg_send(chat_id, reply)
+                if has_photo and photo:
+                    # forward foto bukti ke owner
                     tg_api(cfg.get("tg_bot_token"), "sendPhoto",
                            {"chat_id": owner_id, "photo": photo,
                             "caption": f"🧾 Bukti pembayaran dari {sender.get('username')}"})

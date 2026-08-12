@@ -1,19 +1,19 @@
 {
   "tg_bot_token": "",
   "tg_chat_id": "",
-  "tg_owner_username": "colipopi",
-  "tg_bot_username": "Denzz_ai_bot",
+  "tg_owner_username": "",
+  "tg_bot_username": "",
   "owner": {
-    "username": "denzyx",
+    "username": "",
     "password_hash": "",
     "salt": ""
   },
   "secret": "",
   "price_idr": 20000,
   "sub_days": 30,
-  "qr_url": "https://files.catbox.moe/k5d36r.jpg",
+  "qr_url": "",
   "qr_path": "",
-  "host": "0.0.0.0",
+  "host": "127.0.0.1",
   "port": 8000,
   "ssl_cert": "",
   "ssl_key": "",
@@ -22,5 +22,5 @@
   "chat_rate_max": 30,
   "chat_rate_window": 60,
   "owner_per_page": 50,
-  "ai": {"model": "Pj8/Kik/PzF3LG53PDY7KTJ3PCg/Pw==", "max_tokens": 1024}
+  "ai": {"model": "", "max_tokens": 1024}
 }

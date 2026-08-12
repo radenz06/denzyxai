@@ -286,6 +286,26 @@ class TestMemberChat:
         m = webdenz.load_member("dono")
         assert len(m["messages"]) == 2
 
+    def test_chat_state_custom_model(self, wd):
+        """_chat_state memakai base_url/model/api_key custom member."""
+        import webdenz
+        m = webdenz.create_member("modelstate", "pw1")
+        m["custom_model"] = {"base_url": "https://api.own.com/v1/chat/completions",
+                             "model": "own-model-1",
+                             "api_key": webdenz.enc_secret("sk-custom")}
+        webdenz.save_member(m)
+        state = webdenz._chat_state("modelstate")
+        assert state.base_url == "https://api.own.com/v1/chat/completions"
+        assert state.model == "own-model-1"
+        assert state.api_key == "sk-custom"
+        assert state.url == "https://api.own.com/v1/chat/completions"
+        assert state.key == "sk-custom"
+        # tanpa custom_model → default (bukan key member)
+        m2 = webdenz.create_member("modelstate2", "pw1")
+        state2 = webdenz._chat_state("modelstate2")
+        assert state2.base_url is None
+        assert state2.model != "own-model-1"
+
 
 class TestPages:
     def test_login_page(self, wd):
@@ -432,6 +452,68 @@ class TestHTTP:
             assert st == 200 and "newbie" in body
             # security headers
             assert "nosniff" in h.get("X-Content-Type-Options", "")
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_custom_model_api(self, wd):
+        """/api/model: simpan, baca, dan reset model custom member."""
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            cookie, tok = self._csrf(port, "/register")
+            st, h, body = self._post(port, "/register",
+                                     {"username": "modeluser", "password": "pw123",
+                                      "_csrf": tok}, cookie)
+            assert st == 200
+            m = webdenz.load_member("modeluser")
+            from datetime import datetime, timedelta
+            m["status"] = "active"
+            m["expires_at"] = (datetime.now() + timedelta(days=30)).isoformat()
+            webdenz.save_member(m)
+            cookie, tok = self._csrf(port, "/login")
+            st, h, body = self._post(port, "/login",
+                                     {"username": "modeluser", "password": "pw123",
+                                      "_csrf": tok}, cookie)
+            assert st in (302, 303)
+            mtok = self._cookie_val(h.get("Set-Cookie", ""), "denz_member")
+            mcookie = f"denz_member={mtok}"
+            # belum login → 401
+            st, h, body = self._get(port, "/api/model")
+            assert st == 401
+            # kosong dulu
+            st, h, body = self._get(port, "/api/model", mcookie)
+            assert st == 200
+            j = json.loads(body)
+            assert j["ok"] and not j["base_url"] and not j["model"]
+            # simpan custom model
+            st, h, body = self._post(port, "/api/model",
+                                     {"base_url": "https://api.example.com/v1/chat/completions",
+                                      "model": "gpt-4o-mini", "api_key": "sk-1234"}, mcookie)
+            assert st == 200
+            j = json.loads(body)
+            assert j["ok"]
+            m = webdenz.load_member("modeluser")
+            assert m["custom_model"]["model"] == "gpt-4o-mini"
+            assert "sk-1234" not in m["custom_model"]["api_key"]
+            # key terenkripsi → decrypt cocok
+            assert webdenz.dec_secret(m["custom_model"]["api_key"]) == "sk-1234"
+            # baca lagi
+            st, h, body = self._get(port, "/api/model", mcookie)
+            j = json.loads(body)
+            assert j["base_url"].endswith("/chat/completions")
+            assert j["model"] == "gpt-4o-mini" and j["has_key"]
+            # endpoint tidak valid → 400
+            st, h, body = self._post(port, "/api/model",
+                                     {"base_url": "ftp://x", "model": "m"}, mcookie)
+            assert st == 400
+            # reset
+            st, h, body = self._post(port, "/api/model",
+                                     {"action": "clear"}, mcookie)
+            assert st == 200
+            m = webdenz.load_member("modeluser")
+            assert not m.get("custom_model")
         finally:
             srv.shutdown()
             t.join(timeout=3)
@@ -974,4 +1056,304 @@ class TestVisitors:
         sent.clear()
         db._remind_expiring("OWNER", {})
         assert not sent
+
+
+class TestPayOCR:
+    def test_parse_amount_keyword_line(self):
+        """Baris berisi 'total' diprioritaskan saat parsing nominal."""
+        import payocr
+        text = "BRI - 1234567890\nTOTAL BAYAR Rp 20.000\n12/08 10:30\n"
+        res = payocr.parse_amount(text, expected=20000)
+        assert res and res["amount"] == 20000
+        assert "TOTAL" in (res["line"] or "").upper()
+        assert res["exact"]
+
+    def test_total_bayar_wins_over_other_keyword_line(self):
+        """Logika: baris 'Total Bayar' PASTI berisi nominal — mengalahkan
+        baris keyword lain (mis. 'Tanggal transfer' yang hanya berisi tanggal)."""
+        import payocr
+        text = ("Tanggal transfer 22/05/2026 08:30\n"
+                "No. Referensi 77201543\n"
+                "Total Bayar Rp 20.000\n")
+        res = payocr.parse_amount(text, expected=20000)
+        assert res and res["amount"] == 20000
+        assert "TOTAL BAYAR" in res["line"].upper()
+
+    def test_total_bayar_keyword_has_no_amount_falls_through(self):
+        """Baris 'Total Bayar' tanpa nominal → lanjut ke kecocokan expected."""
+        import payocr
+        text = "Total Bayar\nTgl 22/05\nNo. Referensi 77201543\nRp 20.000"
+        res = payocr.parse_amount(text, expected=20000)
+        assert res and res["amount"] == 20000
+        assert res["exact"]
+
+    def test_parse_amount_rp_regex(self):
+        r"""Pola /(?:Rp\s?)?(\d{1,3}(?:\.\d{3})*)/ membaca 'Rp 50.000'."""
+        import payocr
+        res = payocr.parse_amount("Jumlah transfer: Rp 50.000", expected=50000)
+        assert res and res["amount"] == 50000
+
+    def test_parse_amount_all_numbers(self):
+        r"""Pola /\d{1,3}(?:\.\d{3})*/g menangkap nominal dengan titik."""
+        import payocr
+        res = payocr.parse_amount("Total bayar 100.000", expected=100000)
+        assert res and res["amount"] == 100000
+
+    def test_parse_amount_mismatch_takes_largest(self):
+        """Tanpa keyword: nominal terbesar yang wajar diambil."""
+        import payocr
+        text = "22-05-2026\n77001543\nRp 20.000"
+        res = payocr.parse_amount(text, expected=20000)
+        assert res and res["amount"] == 20000
+
+    def test_verify_payment_ok_and_fail(self):
+        import payocr
+        ok = payocr.verify_payment("Total Rp 20.000", 20000)
+        assert ok["ok"] and ok["amount"] == 20000
+        fail = payocr.verify_payment("Total Rp 5.000", 20000)
+        assert not fail["ok"]
+        none = payocr.verify_payment("Halo saja", 20000)
+        assert not none["ok"]
+
+    def test_verify_payment_tolerance(self):
+        import payocr
+        ok = payocr.verify_payment("Total bayar 20.500", 20000)
+        assert ok["ok"]  # dalam toleransi 5%
+
+    def test_ocr_and_verify_image(self):
+        """End-to-end: gambar bukti → OCR → nominal cocok harga."""
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (520, 200), "white")
+        d = ImageDraw.Draw(img)
+        try:
+            from PIL import ImageFont
+            f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+        except Exception:  # noqa: BLE001
+            f = None
+        d.text((30, 40), "TOTAL BAYAR", fill="black", font=f)
+        d.text((30, 90), "Rp 20.000", fill="black", font=f)
+        d.text((30, 140), "BRI - 1234567890", fill="black", font=f)
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        text, err = payocr.ocr_image(buf.getvalue())
+        assert err is None
+        assert "20" in text
+        report = payocr.verify_payment(text, 20000)
+        assert report["ok"]
+
+
+class TestBotPaymentOCR:
+    def test_verify_payment_proof_auto_activate(self, wd, monkeypatch):
+        """Bukti cocok harga → auto-aktivasi member via _verify_payment_proof."""
+        import denzbot
+        from datetime import datetime, timedelta
+        m = wd.create_member("ocru", "pw1234", "OCR User")
+        m["status"] = "pending"
+        wd.save_member(m)
+
+        # panggil _cmd_set_member sungguhan tapi tg_send dinonaktifkan
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        notifications = []
+        monkeypatch.setattr(denzbot, "tg_notify",
+                            lambda text: notifications.append(text))
+
+        # buat gambar bukti
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (520, 200), "white")
+        d = ImageDraw.Draw(img)
+        try:
+            from PIL import ImageFont
+            f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+        except Exception:  # noqa: BLE001
+            f = None
+        d.text((30, 40), "TOTAL BAYAR", fill="black", font=f)
+        d.text((30, 90), "Rp 20.000", fill="black", font=f)
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        image = buf.getvalue()
+
+        reply = denzbot._verify_payment_proof("ocru", image, "111", "tok")
+        m = wd.load_member("ocru")
+        assert m["status"] == "active"
+        assert m["expires_at"]
+        assert "AKTIF" in reply.upper()
+        assert any("AUTO-AKTIVASI" in n for n in notifications)
+
+    def test_auto_activate_reply_shows_username_password(self, wd, monkeypatch):
+        """Saat auto-aktif, member dapat 'Pembayaran berhasil' + username & password."""
+        import denzbot
+        m = wd.create_member("ocrp", "rahasia123", "OCR Password")
+        m["status"] = "pending"
+        wd.save_member(m)
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        monkeypatch.setattr(denzbot, "tg_notify", lambda text: None)
+
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (520, 200), "white")
+        d = ImageDraw.Draw(img)
+        try:
+            from PIL import ImageFont
+            f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+        except Exception:  # noqa: BLE001
+            f = None
+        d.text((30, 40), "TOTAL BAYAR", fill="black", font=f)
+        d.text((30, 90), "Rp 20.000", fill="black", font=f)
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+        reply = denzbot._verify_payment_proof("ocrp", buf.getvalue(), "111", "tok")
+        m = wd.load_member("ocrp")
+        assert m["status"] == "active"
+        low = reply.lower()
+        assert "pembayaran berhasil" in low
+        assert "silahkan login" in low
+        assert "ocrp" in reply
+        assert "rahasia123" in reply
+
+    def test_verify_payment_proof_wrong_amount(self, wd, monkeypatch):
+        """Bukti nominal tak terbaca OCR → terusan manual ke owner."""
+        import denzbot
+        m = wd.create_member("ocrw", "pw1234", "OCR Wrong")
+        m["status"] = "pending"
+        wd.save_member(m)
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        notifications = []
+        monkeypatch.setattr(denzbot, "tg_notify",
+                            lambda text: notifications.append(text))
+
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+
+        # OCR tidak menemukan nominal (jumlah < 1000 dianggap bukan nominal)
+        monkeypatch.setattr(payocr, "ocr_image",
+                            lambda b: ("BUKTI TRANSFER\nBRI 123", None))
+        reply = denzbot._verify_payment_proof("ocrw", b"x", "222", "tok")
+        m = wd.load_member("ocrw")
+        assert m["status"] == "pending"  # tetap pending
+        assert any("/activate" in n for n in notifications)
+
+    def test_partial_payment_bills_remainder(self, wd, monkeypatch):
+        """Kirim 15.000 dari harga 20.000 → ditagih sisa 5.000 (tetap pending)."""
+        import denzbot
+        m = wd.create_member("part", "pw1234", "Partial")
+        m["status"] = "pending"
+        wd.save_member(m)
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        notifications = []
+        monkeypatch.setattr(denzbot, "tg_notify",
+                            lambda text: notifications.append(text))
+
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+        monkeypatch.setattr(payocr, "ocr_image",
+                            lambda b: ("TOTAL BAYAR Rp 15.000\nDANA 123", None))
+
+        reply = denzbot._verify_payment_proof("part", b"x", "222", "tok")
+        m = wd.load_member("part")
+        assert m["status"] == "pending"
+        assert m["paid"] == 15000
+        assert "KURANG" in reply
+        assert "5.000" in reply
+        assert any("TAGIHAN SISA" in n for n in notifications)
+
+    def test_partial_payment_completes_and_activates(self, wd, monkeypatch):
+        """15.000 lalu kirim lagi 5.000 → total 20.000 → auto-aktif."""
+        import denzbot
+        m = wd.create_member("part2", "pw1234", "Partial2")
+        m["status"] = "pending"
+        wd.save_member(m)
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        monkeypatch.setattr(denzbot, "tg_notify", lambda text: None)
+
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+
+        # bukti 1: 15.000
+        monkeypatch.setattr(payocr, "ocr_image",
+                            lambda b: ("TOTAL BAYAR Rp 15.000\nDANA 111", None))
+        r1 = denzbot._verify_payment_proof("part2", b"x", "222", "tok")
+        m = wd.load_member("part2")
+        assert m["status"] == "pending" and m["paid"] == 15000
+        assert "KURANG" in r1
+
+        # bukti 2: 5.000 → total 20.000 → aktif
+        monkeypatch.setattr(payocr, "ocr_image",
+                            lambda b: ("TOTAL BAYAR Rp 5.000\nDANA 222", None))
+        r2 = denzbot._verify_payment_proof("part2", b"y", "222", "tok")
+        m = wd.load_member("part2")
+        assert m["status"] == "active"
+        assert "pembayaran berhasil" in r2.lower()
+        assert m["paid"] == 0  # reset setelah aktif
+
+    def test_duplicate_proof_not_double_credited(self, wd, monkeypatch):
+        """Bukti yang sama dikirim ulang → tidak dihitung dua kali."""
+        import denzbot
+        m = wd.create_member("dup", "pw1234", "Dup")
+        m["status"] = "pending"
+        wd.save_member(m)
+        monkeypatch.setattr(denzbot, "tg_send", lambda *a, **k: {"ok": True})
+        monkeypatch.setattr(denzbot, "tg_notify", lambda text: None)
+
+        import payocr
+        if not payocr._tesseract_available():
+            pytest.skip("tesseract tidak terpasang")
+        monkeypatch.setattr(payocr, "ocr_image",
+                            lambda b: ("TOTAL BAYAR Rp 15.000\nDANA 111", None))
+
+        denzbot._verify_payment_proof("dup", b"x", "222", "tok")
+        m = wd.load_member("dup")
+        assert m["paid"] == 15000
+        # kirim bukti yang sama lagi → tidak double-credit
+        denzbot._verify_payment_proof("dup", b"x", "222", "tok")
+        m = wd.load_member("dup")
+        assert m["paid"] == 15000
+
+    def test_menu_keyboard_structure(self, wd):
+        import denzbot
+        kb = denzbot._menu_keyboard()
+        rows = kb["inline_keyboard"]
+        assert rows and all(isinstance(r, list) for r in rows)
+        flat = [b["callback_data"] for r in rows for b in r]
+        assert "/status" in flat and "/menu" in flat
+        assert "/members" in flat
+
+    def test_handle_callback_menu(self, wd):
+        import denzbot
+        reply, markup = denzbot.handle_callback("/status", "OWNER")
+        assert reply and "Status" in reply
+        reply2, markup2 = denzbot.handle_callback("/menu", "OWNER")
+        assert reply2 and "MENU OWNER" in reply2.upper()
+        assert markup2 and markup2["inline_keyboard"]
+
+    def test_handle_member_message_photo_no_ocr(self, wd, monkeypatch):
+        """Foto tanpa OCR terpasang → fallback notif manual ke owner."""
+        import denzbot
+        m = wd.create_member("photoman", "pw1234", "Photo")
+        m["status"] = "pending"
+        m["tg_chat_id"] = "999"
+        wd.save_member(m)
+        notifications = []
+        monkeypatch.setattr(denzbot, "tg_notify",
+                            lambda text: notifications.append(text))
+        monkeypatch.setattr(denzbot, "tg_get_file", lambda *a, **k: None)
+        reply = denzbot.handle_member_message("999", has_photo=True,
+                                              photo_id="xyz")
+        assert "owner" in reply.lower()
+        assert any("BUKTI" in n for n in notifications)
+
 

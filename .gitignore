@@ -21,6 +21,13 @@ local.properties
 .coverage
 backup/
 
+# system prompt — konfigurasi lokal, tidak ikut publikasi
+system_prompt.md
+system_prompt.txt
+
+# proyek android pribadi
+DenzTodo/
+
 # webdenz — data & konfigurasi lokal member
 webconfig.json
 webdata/

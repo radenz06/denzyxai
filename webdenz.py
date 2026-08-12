@@ -236,6 +236,8 @@ def create_member(username, password, display_name="", ip=""):
         "created_at": _now_iso(),
         "paid_at": None,
         "expires_at": None,
+        "paid": 0,                 # total pembayaran terakumulasi (RP)
+        "last_proof_hash": None,   # anti double-credit bukti yang sama
         "status": "pending",          # pending -> active -> expired/banned
         "ip": ip,
         "telegram_id": None,
@@ -414,6 +416,15 @@ def _chat_state(username):
     state.model = (cfg.get("ai") or {}).get("model", denzyx.State().model)
     state.max_tokens = (cfg.get("ai") or {}).get("max_tokens", 1024)
     state.messages = list((m or {}).get("messages") or [])
+    cm = (m or {}).get("custom_model") or {}
+    if cm.get("base_url") and cm.get("model"):
+        state.base_url = cm["base_url"]
+        state.model = cm["model"]
+        if cm.get("api_key"):
+            try:
+                state.api_key = dec_secret(cm["api_key"])
+            except Exception:  # noqa: BLE001
+                state.api_key = None
     return state
 def member_chat(username, prompt):
     import denzyx
@@ -691,34 +702,50 @@ _PAGE = """<!doctype html><html lang="id"><head><meta charset="utf-8">
 </div>
 <div class="drawer-backdrop" id="backdrop"></div>
 <nav class="drawer" id="drawer">
-<div class="drawer-head"><b>denzyx AI</b><small>menu &amp; plugin</small></div>
-<a href="/login">🔑 Login Member</a>
-<a href="/register">📝 Registrasi</a>
-<div class="group">Akses</div>
-<a href="/chat">💬 Chat AI</a>
-<a href="/status">📊 Status Langganan</a>
-<a href="/password">🔏 Ganti Password</a>
-<a href="/owner">🛡️ Owner Panel</a>
-<div class="group">Plugin &amp; Lainnya</div>
-<a href="/register">💳 Langganan &amp; QR</a>
-<a href="{bot}">🤖 Bot Telegram</a>
-<a href="https://github.com/radenz06/denzyxai" target="_blank" rel="noopener">📦 GitHub</a>
-<form method="post" action="/logout" class="drawer-logout">
-<input type="hidden" name="_csrf" value="__CSRF__">
-<button type="submit" class="dlogout">🚪 Logout</button></form>
-<div class="foot">denzyx web · {ver}</div>
+{drawer}
 </nav>
 {body}
 <script>{js}</script>
 </body></html>"""
 
 
-def page(title, body, subtitle="member area"):
+def _drawer(logged_in, bot_link):
+    if logged_in:
+        auth = """<a href="/chat">💬 Chat AI</a>
+<a href="/status">📊 Status Langganan</a>
+<a href="/password">🔏 Ganti Password</a>
+<a href="/owner">🛡️ Owner Panel</a>
+<div class="group">Plugin &amp; Lainnya</div>"""
+        out = ("""<div class="drawer-head"><b>denzyx AI</b><small>menu &amp; plugin</small></div>
+<div class="group">Akses</div>
+""" + auth + f"""
+<a href="/register">💳 Langganan &amp; QR</a>
+<a href="{bot_link}">🤖 Bot Telegram</a>
+<a href="https://github.com/radenz06/denzyxai" target="_blank" rel="noopener">📦 GitHub</a>
+<form method="post" action="/logout" class="drawer-logout">
+<input type="hidden" name="_csrf" value="__CSRF__">
+<button type="submit" class="dlogout">🚪 Logout</button></form>
+<div class="foot">denzyx web · {_VER}</div>""")
+    else:
+        out = ("""<div class="drawer-head"><b>denzyx AI</b><small>menu &amp; plugin</small></div>
+<a href="/login">🔑 Login Member</a>
+<a href="/register">📝 Registrasi</a>
+<div class="group">Plugin &amp; Lainnya</div>
+""" + f"""
+<a href="/register">💳 Langganan &amp; QR</a>
+<a href="{bot_link}">🤖 Bot Telegram</a>
+<a href="https://github.com/radenz06/denzyxai" target="_blank" rel="noopener">📦 GitHub</a>
+<div class="foot">denzyx web · {_VER}</div>""")
+    return out
+
+
+def page(title, body, subtitle="member area", logged_in=False):
     cfg = load_config()
     bot = (cfg.get("tg_bot_username") or "").strip().lstrip("@")
     bot_link = f"https://t.me/{bot}" if bot else "/register"
     return _PAGE.format(title=title, css=_CSS, body=body, subtitle=subtitle,
-                        js=_JS, bot=bot_link, ver=_VER)
+                        js=_JS, bot=bot_link, ver=_VER,
+                        drawer=_drawer(logged_in, bot_link))
 
 
 def _error_page(code, title, reason="", note=""):
@@ -887,9 +914,29 @@ def _chat_page(m, cfg):
     tool = '<a href="/status">Status Langganan</a>'
     if is_admin(m):
         tool += '<a href="/admin/add">+ Tambah Member</a>'
+    cm = (m or {}).get("custom_model") or {}
+    if cm.get("base_url") and cm.get("model"):
+        model_badge = (f'<span class="badge active">🧠 {html_esc(cm["model"])}</span>')
+        model_js = "true"
+    else:
+        model_badge = ""
+        model_js = "false"
     return page("Chat", f"""
-<div class="toolbar">{tool}</div>
+<div class="toolbar">{tool} {model_badge}</div>
 <div id="msgs">{msgs_html}</div>
+<div id="mpanel" class="card hidden">
+<h3 style="margin-top:0">🛠️ Model AI Sendiri</h3>
+<small>Pakai API key & endpoint model kamu sendiri (OpenAI-compatible). Ketik <b>/model</b> untuk buka panel ini.</small>
+<label>API Key</label>
+<input id="mkey" type="password" placeholder="sk-..." autocomplete="off">
+<label>Endpoint URL</label>
+<input id="murl" placeholder="https://api.xxx.com/v1/chat/completions" autocomplete="off">
+<label>Nama Model</label>
+<input id="mname" placeholder="contoh: gpt-4o-mini" autocomplete="off">
+<button type="button" id="msave">💾 Simpan Model</button>
+<button type="button" id="mclear" class="danger">🗑️ Kembali ke Default</button>
+<div id="mmsg"></div>
+</div>
 <form id="fm"><div id="wrap">
 <input id="inp" placeholder="ketik pesan..." autocomplete="off">
 <div id="sug" class="hidden"></div>
@@ -917,6 +964,12 @@ function md(s){{
 function addMsg(cls,who,inner){{msgs.insertAdjacentHTML('beforeend','<div class="msg '+cls+'"><small>'+esc2(who)+'</small><br>'+inner+'</div>');msgs.scrollTop=msgs.scrollHeight;}}
 inp.addEventListener('input',()=>{{
  const v=inp.value.trim().toLowerCase();
+ if(v==='/model'||v.startsWith('/model ')){{
+  sug.innerHTML='<div class="sugi" data-cmd="model">🛠️ /model — atur model AI sendiri (api key & endpoint)</div>';
+  sug.classList.remove('hidden');hidx=0;
+  sug.querySelectorAll('.sugi').forEach(el=>el.onclick=()=>{{openModel();hideSug();}});
+  return;
+ }}
  const list=ALL.filter(s=>s.toLowerCase().startsWith(v)).slice(0,8);
  if(!v||!list.length){{sug.classList.add('hidden');sug.innerHTML='';hidx=-1;return;}}
  sug.innerHTML=list.map((s,i)=>
@@ -944,7 +997,9 @@ inp.addEventListener('keydown',e=>{{
  if(e.key==='Escape')hideSug();
 }});
 fm.onsubmit=async e=>{{e.preventDefault();
-const v=inp.value.trim();if(!v)return;inp.value='';
+const v=inp.value.trim();if(!v)return;
+if(v==='/model'||v.startsWith('/model ')){{inp.value='';openModel();return;}}
+inp.value='';
 hideSug();
 addMsg('user','Kamu',esc2(v));
 const d=document.createElement('div');
@@ -969,7 +1024,45 @@ for(;;){{
 }}
 if(!buf){{d.innerHTML='<small>Denzyx</small><br><i>(tidak ada jawaban)</i>';}}
 }};
-</script>""")
+const mpanel=document.getElementById('mpanel');
+const mmsg=document.getElementById('mmsg');
+function mnote(ok,text){{mmsg.innerHTML='<small style="color:'+(ok?'var(--ok)':'var(--err)')+'">'+esc2(text)+'</small>';}}
+async function openModel(){{
+ mpanel.classList.remove('hidden');
+ try{{
+  const r=await fetch('/api/model');
+  const j=await r.json();
+  if(j.ok){{
+   document.getElementById('murl').value=j.base_url||'';
+   document.getElementById('mname').value=j.model||'';
+   document.getElementById('mkey').value='';
+   mnote(true,j.has_key?'API key sudah tersimpan — isi ulang untuk mengganti.':'Belum ada API key (opsional, model tanpa auth).');
+  }}
+ }}catch(_){{}}
+ mpanel.scrollIntoView({{behavior:'smooth',block:'start'}});
+}}
+document.getElementById('msave').onclick=async()=>{{
+ const body={{base_url:document.getElementById('murl').value.trim(),
+             model:document.getElementById('mname').value.trim()}};
+ const key=document.getElementById('mkey').value.trim();
+ if(key)body.api_key=key;
+ if(!body.base_url||!body.model){{mnote(false,'Endpoint URL & nama model wajib diisi.');return;}}
+ try{{
+  const r=await fetch('/api/model',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  const j=await r.json();
+  mnote(j.ok,j.msg||j.error||'gagal');
+  if(j.ok)location.reload();
+ }}catch(_){{mnote(false,'gagal menyimpan');}}
+}};
+document.getElementById('mclear').onclick=async()=>{{
+ try{{
+  const r=await fetch('/api/model',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:'clear'}})}});
+  const j=await r.json();
+  mnote(j.ok,j.msg||j.error||'gagal');
+  if(j.ok)location.reload();
+ }}catch(_){{mnote(false,'gagal reset');}}
+}};
+</script>""", logged_in=True)
 
 
 def _status_page(m):
@@ -990,7 +1083,7 @@ def _status_page(m):
 <p>Nama: {html_esc(m.get('display_name', '-'))}</p>
 <p>Aktif s/d: <b>{html_esc(m.get('expires_at') or '-')}</b></p>
 <p>Terdaftar: {html_esc(m.get('created_at'))}</p>
-<p><small><a href="/chat">← ke Chat</a> · <a href="/password">Ganti Password</a></small></p></div>""")
+<p><small><a href="/chat">← ke Chat</a> · <a href="/password">Ganti Password</a></small></p></div>""", logged_in=True)
 
 
 def _owner_page(cfg, msg="", err="", q="", pg=1):
@@ -1043,7 +1136,7 @@ def _owner_page(cfg, msg="", err="", q="", pg=1):
 <p>Member: {total} · Admin: {admins} · Server: {html_esc(cfg.get('host'))}:{cfg.get('port')}
  · Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari</p>
 {search}</div>
-<div class="card">{table}{nav}</div>""", subtitle="owner")
+<div class="card">{table}{nav}</div>""", subtitle="owner", logged_in=True)
 
 
 def _admin_add_page(cfg, msg="", err=""):
@@ -1060,7 +1153,7 @@ def _admin_add_page(cfg, msg="", err=""):
     return page("Tambah Member", f"""<div class="toolbar">
 <a href="/chat">Chat</a><a href="/status">Status Langganan</a>
 <a href="/admin/add">+ Tambah Member</a></div>
-{body}""", subtitle="admin")
+{body}""", subtitle="admin", logged_in=True)
 
 
 def _owner_security_page(msg="", err=""):
@@ -1096,7 +1189,7 @@ def _owner_security_page(msg="", err=""):
 <div class="card"><h3>🛡️ IP yang Diblokir WAF</h3>
 <p><small>IP di-ban otomatis saat ada serangan (scanner, brute-force, dll) —
 di-banner permanen. Unban dari sini atau via bot: /unbanip &lt;ip&gt;.</small></p>
-{table}</div>""", subtitle="owner")
+{table}</div>""", subtitle="owner", logged_in=True)
 
 
 def _visitor_badges(v, bans):
@@ -1207,7 +1300,7 @@ riwayat login. Data terenkripsi (Fernet) di
 <form method="post" style="margin-top:12px">{csrf}
 <button name="action" value="clear" class="err"
 style="width:auto;display:inline-block;padding:8px 14px">🗑️ Hapus semua data pengunjung</button>
-</form></div>""", subtitle="owner")
+</form></div>""", subtitle="owner", logged_in=True)
 
 
 def _owner_visitor_page(ip, msg="", err=""):
@@ -1218,7 +1311,7 @@ def _owner_visitor_page(ip, msg="", err=""):
 <a href="/owner">Dashboard</a><a href="/owner/visitors">← Pengunjung</a></div>
 {_flash(msg, err)}
 <div class="card"><h3>👁️ Visitor {html_esc(ip)}</h3>
-<p>Data tidak ditemukan.</p></div>""", subtitle="owner")
+<p>Data tidak ditemukan.</p></div>""", subtitle="owner", logged_in=True)
     bans = waf.list_bans()
     rows = [
         ("IP", v.get("ip", "")),
@@ -1304,7 +1397,7 @@ style="width:auto;display:inline-block;padding:8px 14px">⛔ Ban IP ini</button>
 <div class="card"><h3>Riwayat Login</h3><ul>{logins}</ul></div>
 <div class="card"><h3>Path yang dikunjungi</h3><ul>{paths}</ul></div>
 <div class="card"><h3>Referer</h3><ul>{refs}</ul></div>
-<div class="card"><h3>Riwayat terakhir</h3>{log_tbl}</div>""", subtitle="owner")
+<div class="card"><h3>Riwayat terakhir</h3>{log_tbl}</div>""", subtitle="owner", logged_in=True)
 
 
 def _owner_member_page(m):
@@ -1355,7 +1448,7 @@ def _owner_member_page(m):
 <div class="card"><h4>Sesi aktif</h4><pre>{html_esc(json.dumps(m.get('sessions') or [], indent=2, ensure_ascii=False))}</pre></div>
 <div class="card"><h4>Riwayat chat</h4>
 <a href="/owner/member/{html_esc(m['username'])}/md">Lihat file md sesi</a></div>""",
-                 subtitle="owner")
+                 subtitle="owner", logged_in=True)
 
 
 def _owner_logs_page(q="", pg=1):
@@ -1390,7 +1483,7 @@ def _owner_logs_page(q="", pg=1):
 {blocks['register']}
 {blocks['login']}
 {blocks['admin']}""",
-                 subtitle="owner")
+                 subtitle="owner", logged_in=True)
 
 
 def _password_page(msg="", err=""):
@@ -1410,7 +1503,7 @@ def _password_page(msg="", err=""):
 <button type="submit">Simpan Password Baru →</button></form>
 <div class="auth-switch"><a href="/status">← ke Status</a></div>
 </div></div>"""
-    return page("Ganti Password", body)
+    return page("Ganti Password", body, logged_in=True)
 
 
 def html_esc(s):
@@ -1896,6 +1989,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_status(m)
         elif path == "/api/me":
             self._api_me(m)
+        elif path == "/api/model":
+            self._api_model_get(m)
         elif path == "/login":
             self._html(_login_page(cfg).encode())
         elif path == "/register":
@@ -1951,6 +2046,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         path = self._path
         data = self._form()
+        m, _ = self._auth_member()
         if path == "/api/register":
             self._api_register(data)
         elif path == "/api/login":
@@ -1961,6 +2057,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_chat(data)
         elif path == "/api/chat/stream":
             self._post_chat_stream(data)
+        elif path == "/api/model":
+            self._api_model_save(data, m)
         elif path == "/logout":
             if self._csrf_ok(data):
                 hdr = {"Set-Cookie": _cookie("denz_member", "", max_age=0,
@@ -2099,6 +2197,52 @@ class Handler(BaseHTTPRequestHandler):
                          "status": member_status(m),
                          "expires_at": m.get("expires_at"),
                          "pay_link": _pay_tg_link(load_config(), m)})
+
+    def _api_model_get(self, m):
+        """Ambil config model custom member (base_url/model/set_key)."""
+        if not m:
+            self._json(401, {"ok": False, "error": "login dulu"})
+            return
+        cm = (m or {}).get("custom_model") or {}
+        self._json(200, {"ok": True,
+                         "base_url": cm.get("base_url") or "",
+                         "model": cm.get("model") or "",
+                         "has_key": bool(cm.get("api_key"))})
+
+    def _api_model_save(self, data, m):
+        """Simpan/hapus config model custom milik member sendiri.
+
+        Data: base_url (endpoint), model (nama model), api_key (opsional),
+        action="clear" untuk kembali ke model default.
+        """
+        if not m:
+            self._json(401, {"ok": False, "error": "login dulu"})
+            return
+        cm = dict((m or {}).get("custom_model") or {})
+        action = str(data.get("action") or "")
+        if action == "clear":
+            m.pop("custom_model", None)
+            save_member(m)
+            self._json(200, {"ok": True, "msg": "kembali ke model default"})
+            return
+        base_url = str(data.get("base_url") or "").strip()
+        model = str(data.get("model") or "").strip()
+        if not base_url.startswith(("http://", "https://")):
+            self._json(400, {"ok": False, "error": "endpoint harus http(s) URL"})
+            return
+        if not model:
+            self._json(400, {"ok": False, "error": "nama model wajib diisi"})
+            return
+        cm["base_url"] = base_url
+        cm["model"] = model
+        key = str(data.get("api_key") or "").strip()
+        if key:
+            cm["api_key"] = enc_secret(key)
+        elif not cm.get("api_key"):
+            cm.pop("api_key", None)
+        m["custom_model"] = cm
+        save_member(m)
+        self._json(200, {"ok": True, "msg": "model custom tersimpan"})
 
     # --- handlers ---
     def _serve_qr(self, cfg):
