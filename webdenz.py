@@ -1474,12 +1474,29 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def handle_one_request(self):
+        """Jalankan SATU request lalu lepas slot koneksi.
+
+        Dengan HTTP/1.1 keep-alive, satu koneksi menangani banyak request.
+        _prelude() menambah slot di enter() per request — tanpa release
+        per-request, counter naik terus dan semua request berikutnya kena 429
+        "terlalu banyak koneksi". Release di sini, bukan di finish().
+        """
+        try:
+            super().handle_one_request()
+        finally:
+            ip = getattr(self, "_real_ip", None)
+            if ip and getattr(self, "_conn_in", False):
+                self._conn_in = False
+                _CONN.exit(ip)
+
     def finish(self):
         try:
             super().finish()
         finally:
             ip = getattr(self, "_real_ip", None)
-            if ip:
+            if ip and getattr(self, "_conn_in", False):
+                self._conn_in = False
                 _CONN.exit(ip)
 
     # --- helpers ---
@@ -1685,6 +1702,7 @@ class Handler(BaseHTTPRequestHandler):
         if not _CONN.enter(self._real_ip):
             self._json(429, {"error": "terlalu banyak koneksi, coba lagi"})
             return True
+        self._conn_in = True
         # host header smuggling / Host asing (allowlist opsional)
         host = self.headers.get("Host") or ""
         if "\r" in host or "\n" in host:

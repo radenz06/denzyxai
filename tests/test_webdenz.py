@@ -755,6 +755,27 @@ class TestHTTP:
         assert "Referer" in msg
         assert "Cek owner panel" in msg
 
+    def test_keepalive_no_false_429(self, wd):
+        """HTTP/1.1 keep-alive: banyak request pada satu koneksi TIDAK boleh
+        kena 429 'terlalu banyak koneksi' (release slot per-request)."""
+        import http.client
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            codes = []
+            for _ in range(12):  # > max_per_ip (8) pada koneksi yang sama
+                conn.request("GET", "/login")
+                r = conn.getresponse()
+                codes.append(r.status)
+                r.read()
+            conn.close()
+            assert 429 not in codes, f"false 429: {codes}"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 class TestVisitors:
     """Test panel pengunjung (helpers sendiri — jangan subclass TestHTTP,
