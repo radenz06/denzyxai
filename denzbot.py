@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """denzbot — bot Telegram untuk webdenz (member & admin).
 
-- Semua event (registrasi, request, login, ban, dsb) diteruskan ke chat owner.
+- Semua event (registrasi, request, login, ban, dll) diteruskan ke chat owner.
 - Owner (chat id sesuai webconfig.json) bisa kontrol lewat bot:
   /start /status /members /member <user> /ban <user> /unban <user>
   /activate <user> /approve <user> /reject <user> /extend <user> <hari>
   /addmember <user> <pass> [hari] /addadmin <user> /rmadmin <user> /logs
+  /bans /unbanip <ip> /block <ip>  (keamanan WAF)
 - Admin (reseller) hanya bisa /addmember.
 - Daftar 2 metode: registrasi di web, ATAU request langsung via bot
   (/daftar <username> <password>) → owner approve langsung dari bot.
@@ -23,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import webdenz  # noqa: E402
+import waf  # noqa: E402
 
 API = "https://api.telegram.org"
 
@@ -238,11 +240,50 @@ def _cmd_reject(cfg, arg):
     return f"🗑 Request {username} ditolak & dihapus."
 
 
+def _cmd_bans(_cfg, arg=""):
+    """Daftar IP yang diblokir WAF (owner)."""
+    items = waf.list_bans()
+    if not items:
+        return "✅ Tidak ada IP yang diblokir."
+    lines = ["🚫 IP yang DIBLOKIR WAF:"]
+    for ip, e in sorted(items.items(),
+                        key=lambda kv: kv[1].get("first_seen_ts") or 0,
+                        reverse=True)[:20]:
+        when = (e.get("last_seen") or "-")[:19]
+        lines.append(f"• <code>{ip}</code> — {e.get('reason')} "
+                     f"({int(e.get('count') or 1)}x) [{when}]"
+                     + (f"\n  📍 {e.get('geo')}" if e.get("geo") else ""))
+    lines.append("\nUnban: /unbanip <ip>")
+    return "\n".join(lines)
+
+
+def _cmd_unbanip(_cfg, arg):
+    ip = (arg or "").strip()
+    if not ip:
+        return "Pakai: /unbanip <ip>"
+    if not waf.unban(ip):
+        return f"✖ IP tidak ada di ban list: {ip}"
+    webdenz.log_activity("waf_unban", ip)
+    return f"✅ IP {ip} dibuka blokirnya."
+
+
+def _cmd_block(_cfg, arg):
+    ip = (arg or "").strip()
+    if not ip:
+        return "Pakai: /block <ip> (blokir IP permanen)"
+    waf.ban(ip, "manual oleh owner via bot", path="")
+    webdenz.log_activity("waf_manual_ban", ip)
+    return f"⛔ IP {ip} diblokir permanen. Unban: /unbanip {ip}"
+
+
 _HANDLERS = {
     "/status": _cmd_status,
     "/members": _cmd_members,
     "/member": _cmd_member,
     "/logs": _cmd_logs,
+    "/bans": _cmd_bans,
+    "/unbanip": _cmd_unbanip,
+    "/block": _cmd_block,
     "/ban": lambda c, a: _cmd_set_member("ban", a),
     "/unban": lambda c, a: _cmd_set_member("unban", a),
     "/activate": lambda c, a: _cmd_set_member("activate", a),
@@ -381,7 +422,7 @@ def handle_admin_message(chat_id, text=""):
         return _cmd_addmember(cfg, arg)
     if cmd in ("/status", "/members", "/member", "/logs", "/ban", "/unban",
                "/activate", "/approve", "/extend", "/addadmin", "/rmadmin",
-               "/reject"):
+               "/reject", "/bans", "/unbanip", "/block"):
         return "⛔ Perintah itu khusus owner. Sebagai admin kamu cuma bisa /addmember."
     return _ADMIN_HELP
 
@@ -455,7 +496,8 @@ def handle_message(text):
                 "/activate <user> /approve <user> /reject <user> "
                 "/ban <user> /unban <user> /extend <user> <hari> "
                 "/addmember <user> <pass> [hari] "
-                "/addadmin <user> /rmadmin <user>")
+                "/addadmin <user> /rmadmin <user> "
+                "/bans /unbanip <ip> /block <ip>")
     try:
         if arg:
             return fn(cfg, arg)

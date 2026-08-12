@@ -64,6 +64,11 @@ DEFAULT_THEME = {
     "md_code":     (curses.COLOR_YELLOW, -1),  # 11 kode markdown
     "md_bullet":   (curses.COLOR_GREEN, -1),   # 12 bullet markdown
     "md_quote":    (39, -1),      # 13 kutipan markdown
+    "diff_add":    (curses.COLOR_GREEN, -1),   # 14 diff baris tambah
+    "diff_del":    (curses.COLOR_RED, -1),     # 15 diff baris hapus
+    "diff_hunk":   (39, -1),      # 16 diff header @@
+    "diff_hdr":    (curses.COLOR_YELLOW, -1),  # 17 diff ---/+++
+    "diff_ctx":    (curses.COLOR_WHITE, -1),   # 18 diff konteks
 }
 
 
@@ -96,6 +101,30 @@ def load_theme():
     return theme
 
 
+def _init_theme_pairs(th):
+    """Terapkan (fg,bg) dari dict tema ke curses color pair 1-18.
+    Nomor pair FIXED (dipakai STYLE_ATTR) — warna saja yang ikut tema,
+    jadi bisa dipanggil ulang kapan pun (mis. /themes) tanpa restart."""
+    curses.init_pair(1, th["banner"][0], th["banner"][1])
+    curses.init_pair(2, th["user"][0], th["user"][1])
+    curses.init_pair(3, th["assistant"][0], th["assistant"][1])
+    curses.init_pair(4, th["yellow"][0], th["yellow"][1])
+    curses.init_pair(5, th["error"][0], th["error"][1])
+    curses.init_pair(6, th["label_user"][0], th["label_user"][1])
+    curses.init_pair(7, th["label_ai"][0], th["label_ai"][1])
+    curses.init_pair(8, th["label_tool"][0], th["label_tool"][1])
+    curses.init_pair(9, th["label_error"][0], th["label_error"][1])
+    curses.init_pair(10, th["md_heading"][0], th["md_heading"][1])
+    curses.init_pair(11, th["md_code"][0], th["md_code"][1])
+    curses.init_pair(12, th["md_bullet"][0], th["md_bullet"][1])
+    curses.init_pair(13, th["md_quote"][0], th["md_quote"][1])
+    curses.init_pair(14, th["diff_add"][0], th["diff_add"][1])
+    curses.init_pair(15, th["diff_del"][0], th["diff_del"][1])
+    curses.init_pair(16, th["diff_hunk"][0], th["diff_hunk"][1])
+    curses.init_pair(17, th["diff_hdr"][0], th["diff_hdr"][1])
+    curses.init_pair(18, th["diff_ctx"][0], th["diff_ctx"][1])
+
+
 def _wib_time():
     """Waktu Indonesia Barat (UTC+7, tanpa DST). Fallback offset manual
     bila zoneinfo/tzdata tidak tersedia."""
@@ -110,6 +139,7 @@ import time
 import unicodedata
 import urllib.request
 import urllib.error
+import difflib
 import re
 import random
 import shutil
@@ -162,6 +192,11 @@ import dscli as _dscli  # noqa: E402
 TOOLS = _dscli.TOOLS
 TOOL_IMPL = _dscli.TOOL_IMPL
 SAFE_TOOLS = _dscli.SAFE_TOOLS
+# tool baca-only dipakai di mode RENCANA (plan) — AI tidak boleh edit
+PLAN_TOOLS = [
+    t for t in TOOLS
+    if (t.get("function") or {}).get("name") in SAFE_TOOLS
+]
 
 FORE, BACK = 0, 0  # diisi di init
 
@@ -230,6 +265,8 @@ class State:
         self.max_tokens = 8192
         self.show_reasoning = True
         self.agent_mode = True     # tool calling aktif
+        self.plan_mode = False     # mode RENCANA (tool baca-only, tanpa edit)
+        self.show_details = True   # /details — tampil detail tool & output
         self.auto_allow = True     # eksekusi tool tanpa konfirmasi
         self.cwd = Path.cwd()      # folder kerja AI (semua tool relatif ke sini)
         self.messages = []          # riwayat chat aktif
@@ -650,8 +687,12 @@ def _compact_context(state, messages):
         for m in messages)
     if total <= CONTEXT_CHAR_LIMIT:
         return messages
-    tail = list(messages[-COMPACT_KEEP_LAST:])
-    head = messages[:-COMPACT_KEEP_LAST]
+    # pesan system (system prompt, folder kerja, aturan) TIDAK boleh
+    # ikut di-summarize — dipisah dan dipertahankan utuh di depan
+    sys_msgs = [m for m in messages if m.get("role") == "system"]
+    others = [m for m in messages if m.get("role") != "system"]
+    tail = list(others[-COMPACT_KEEP_LAST:])
+    head = others[:-COMPACT_KEEP_LAST]
     blob_parts = []
     for m in head:
         role = m.get("role", "")
@@ -664,13 +705,120 @@ def _compact_context(state, messages):
         blob = blob[-COMPACT_SUMMARY_TEXT:]
     summary = _summarize(state, blob) if blob.strip() else None
     if summary:
-        out = [{"role": "system",
-                "content": "Ringkasan percakapan sebelumnya (dikompres):\n"
-                           + summary}] + _prune_orphan_tools(tail)
+        out = sys_msgs + [{"role": "system",
+                           "content": "Ringkasan percakapan sebelumnya "
+                                      "(dikompres):\n" + summary}] \
+            + _prune_orphan_tools(tail)
     else:
         # fallback: tetap buang bagian lama biar konteks terpangkas
-        out = _prune_orphan_tools(tail)
+        out = sys_msgs + _prune_orphan_tools(tail)
     return out
+
+
+def compact_session(state):
+    """/compact — kompaksi MANUAL sesi aktif (state.messages). Return
+    ringkasan status sebagai string."""
+    msgs = list(state.messages)
+    if not msgs:
+        return "tidak ada pesan untuk dikompak"
+    blob_parts = []
+    for m in msgs:
+        role = m.get("role", "")
+        text = str(m.get("content") or "")
+        if not text.strip():
+            continue
+        blob_parts.append(f"[{role}] {text}")
+    blob = "\n".join(blob_parts)
+    if len(blob) > COMPACT_SUMMARY_TEXT:
+        blob = blob[-COMPACT_SUMMARY_TEXT:]
+    if not blob.strip():
+        return "tidak ada isi untuk dirangkum"
+    summary = _summarize(state, blob)
+    if not summary:
+        return "gagal merangkum (periksa koneksi)"
+    tail = _prune_orphan_tools(msgs[-COMPACT_KEEP_LAST:])
+    state.messages = ([{"role": "system",
+                        "content": "Ringkasan percakapan sebelumnya "
+                                   "(dikompres):\n" + summary}] + tail)
+    state.session_title = (state.session_title
+                           or summary.strip().splitlines()[0][:40])
+    return f"kompak ✓ {len(msgs)} pesan → ringkasan + {len(tail)} terakhir"
+
+
+def git_is_repo(cwd):
+    """True bila cwd di dalam repo git."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and r.stdout.strip() == "true"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def git_snapshot(cwd):
+    """Ambil patch kerja git (tracked) + daftar untracked. Return dict
+    atau None bila bukan repo git."""
+    if not git_is_repo(cwd):
+        return None
+    try:
+        diff = subprocess.run(
+            ["git", "-C", str(cwd), "diff", "--binary"],
+            capture_output=True, text=True, timeout=60).stdout
+        unt = subprocess.run(
+            ["git", "-C", str(cwd), "ls-files", "--others",
+             "--exclude-standard"],
+            capture_output=True, text=True, timeout=60).stdout
+        return {
+            "patch": diff,
+            "untracked": [l for l in unt.splitlines() if l.strip()],
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def git_apply(cwd, patch, revert=False):
+    """Apply patch kerja git (revert=True = kebalikannya). Return True/False."""
+    if not patch:
+        return True
+    try:
+        cmd = ["git", "-C", str(cwd), "apply", "--binary"]
+        if revert:
+            cmd.append("-R")
+        r = subprocess.run(cmd, input=patch, capture_output=True,
+                           text=True, timeout=60)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _make_diff(path, before, after):
+    """Unified diff (isi saja, tanpa header @@) untuk render berwarna.
+    Return string kosong bila tidak ada perubahan."""
+    if before == after:
+        return ""
+    try:
+        a = before.splitlines()
+        b = after.splitlines()
+        rows = list(difflib.unified_diff(a, b, lineterm="",
+                                         n=1, fromfile=str(path),
+                                         tofile=str(path)))
+        return "\n".join(rows)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _diff_line_kind(line):
+    """Klasifikasi baris diff untuk warna: add/rem/hunk/lain."""
+    if line.startswith("+++") or line.startswith("---"):
+        return "diff_hdr"
+    if line.startswith("+") and not line.startswith("+++"):
+        return "diff_add"
+    if line.startswith("-") and not line.startswith("---"):
+        return "diff_del"
+    if line.startswith("@@"):
+        return "diff_hunk"
+    return "diff_ctx"
 
 
 def _run_subagent(state, prompt, out_queue, stop_evt=None, depth=1):
@@ -692,8 +840,8 @@ def _run_subagent(state, prompt, out_queue, stop_evt=None, depth=1):
         if stop_evt is not None and stop_evt.is_set():
             return "✋ dihentikan user (ESC)"
         content, reasoning, calls = _api_stream(
-            state, msgs, TOOLS, out_queue, stop_evt, timeout=300,
-            visible=False)
+            state, msgs, PLAN_TOOLS if state.plan_mode else TOOLS,
+            out_queue, stop_evt, timeout=300, visible=False)
         if content:
             parts.append(content)
         elif reasoning:
@@ -818,6 +966,34 @@ def stream_agent(state, prompt, out_queue, decision_queue, stop_evt=None,
                             out_queue, stop_evt)
                     except Exception as e:  # noqa: BLE001
                         result = f"error: {e}"
+                elif name in ("write", "edit"):
+                    # capture diff file sebelum/sesudah (rendering ala opencode)
+                    fn = TOOL_IMPL.get(name)
+                    try:
+                        args = _resolve_tool_args(name, args, state.cwd)
+                        target = Path(args.get("path") or "")
+                        before = ""
+                        if target.is_file():
+                            try:
+                                before = target.read_text(
+                                    encoding="utf-8", errors="replace")
+                            except OSError:
+                                before = ""
+                        result = fn(**args)
+                        after = ""
+                        if target.is_file():
+                            try:
+                                after = target.read_text(
+                                    encoding="utf-8", errors="replace")
+                            except OSError:
+                                after = ""
+                        diff = _make_diff(target, before, after)
+                    except TypeError as e:
+                        result = f"error: argumen tidak valid: {e}"
+                        diff = ""
+                    except Exception as e:  # noqa: BLE001
+                        result = f"error: {e}"
+                        diff = ""
                 else:
                     fn = TOOL_IMPL.get(name)
                     try:
@@ -830,16 +1006,20 @@ def stream_agent(state, prompt, out_queue, decision_queue, stop_evt=None,
                         result = f"error: argumen tidak valid: {e}"
                     except Exception as e:  # noqa: BLE001
                         result = f"error: {e}"
+                    diff = ""
             else:
                 result = ("user menolak menjalankan tool ini. "
                           "Beri tahu user dan tanyakan langkah lain.")
+                diff = ""
             if len(result) > 6000:
                 result = result[:6000] + "\n[output terpotong]"
             tool_msg = {"role": "tool", "tool_call_id": c["id"],
                         "content": result}
+            if diff:
+                tool_msg["diff"] = diff
             messages.append(tool_msg)
             state.messages.append(tool_msg)
-            out_queue.put(("tool_result", (name, args, result)))
+            out_queue.put(("tool_result", (name, args, result, diff)))
         return True
 
     try:
@@ -851,7 +1031,8 @@ def stream_agent(state, prompt, out_queue, decision_queue, stop_evt=None,
             if stop_evt is not None and stop_evt.is_set():
                 return
             content, reasoning, calls = _api_stream(
-                state, messages, TOOLS, out_queue, stop_evt, timeout=300)
+                state, messages, PLAN_TOOLS if state.plan_mode else TOOLS,
+                out_queue, stop_evt, timeout=300)
             if not calls:
                 # selesai tanpa tool: konten sudah di-stream per-delta ke
                 # state.messages oleh main thread (handler "content").
@@ -1610,6 +1791,9 @@ BANNERS = {
 
 # batas panjang prompt (cukup untuk paste 10.000+ baris)
 MAX_INPUT = 2_000_000
+# batas teks yang diterima saat paste — lebih dari ini DIBUANG, biar
+# paste raksasa tidak bikin nunggu lama. Ubah angka ini sesuai kebutuhan.
+MAX_PASTE_LEN = 300
 
 HELP_LINES = [
     "ctrl+p      command palette",
@@ -1631,9 +1815,39 @@ HELP_LINES = [
     "pgup/pgdn   scroll · end bawah · wheel scroll",
     "klik pesan   menu aksi: salin / revert (undo) / hapus+prompt ulang / batal antrean",
     "slash: /help /clear /new /model /agent /session /menu",
-    "       /export /rename /cwd",
+    "       /export /rename /cwd /themes",
+    "       /undo /redo /plan /read /init /editor",
+    "    !perintah → jalankan shell, hasil masuk konteks (ala opencode)",
+    "    @file     → sisipkan isi file ke prompt",
+    "    /plan ON  → AI hanya menganalisis, tidak mengubah file",
+    "    /editor   → compose pesan di $EDITOR",
     "system prompt: file system_prompt.md (edit = langsung aktif)",
     "tema: file theme.md (nama = fg,bg) · notifikasi selesai: DENZYX_NOTIFY=0",
+]
+
+# daftar perintah slash — dipakai sugesti saat ketik "/" (ala opencode)
+SLASH_COMMANDS = [
+    ("/help", "bantuan & pintasan keyboard"),
+    ("/clear", "kosongkan percakapan ini"),
+    ("/new", "buat sesi baru"),
+    ("/model", "ganti model AI"),
+    ("/agent", "toggle agent mode (tools)"),
+    ("/session", "buka daftar sesi"),
+    ("/export", "ekspor chat ke file"),
+    ("/rename", "ganti judul sesi"),
+    ("/cwd", "ubah folder kerja"),
+    ("/menu", "kembali ke menu utama"),
+    ("/themes", "pilih tema warna"),
+    ("/plan", "mode rencana (AI baca-only)"),
+    ("/read", "baca file → sisip ke konteks"),
+    ("/init", "generate AGENTS.md dari proyek"),
+    ("/undo", "batalkan giliran terakhir"),
+    ("/redo", "kembalikan undo"),
+    ("/editor", "compose pesan di $EDITOR"),
+    ("/reason", "tampil/sembunyi berpikir"),
+    ("/details", "tampil/sembunyi detail tool"),
+    ("/compact", "kompakkan riwayat (info)"),
+    ("/system", "info system prompt"),
 ]
 
 
@@ -1747,6 +1961,84 @@ def model_dialog(stdscr, state):
             return MODELS[sel]
         elif ch == curses.KEY_RESIZE:
             pass
+
+
+def file_picker(stdscr, cwd):
+    """Fuzzy file picker untuk @reference (ala opencode). Ketik untuk
+    filter, Enter pilih. Return path relatif atau None (batal)."""
+    SKIP = {".git", ".denzyx", "node_modules", "__pycache__",
+            ".venv", "venv", ".idea", ".vscode", "dist", "build"}
+    root = Path(cwd)
+    files = []
+    try:
+        for p in root.rglob("*"):
+            if p.is_file():
+                rel = str(p.relative_to(root))
+                if any(s in SKIP for s in Path(rel).parts):
+                    continue
+                if len(rel) > 120:
+                    continue
+                files.append(rel)
+                if len(files) >= 3000:
+                    break
+    except OSError:
+        pass
+    files.sort(key=lambda s: (s.lower(), len(s)))
+    filt = ""
+    shown = list(files)
+    sel = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        bh = max(8, h - 4)
+        bw = min(60, max(40, w - 6))
+        by = max(0, (h - bh) // 2)
+        bx = max(0, (w - bw) // 2)
+        win = curses.newwin(bh, bw, by, bx)
+        visible = max(1, bh - 5)
+        start = max(0, min(sel - 1, len(shown) - visible))
+        win.erase()
+        try:
+            win.border(0)
+            win.addstr(0, 2, " @ file ", curses.A_BOLD)
+            win.addstr(1, 2, f"filter: {filt}"[:bw - 4], curses.A_DIM)
+            for i in range(start, min(len(shown), start + visible)):
+                label = shown[i]
+                if i == sel:
+                    win.addnstr(i - start + 2, 2, label[:bw - 5], bw - 5,
+                                curses.A_BOLD | curses.color_pair(1))
+                else:
+                    win.addnstr(i - start + 2, 2, label[:bw - 5], bw - 5, 0)
+            footer = (f"{len(shown)} file · ↑↓ · ketik filter · Enter pilih "
+                      f"· ESC batal")[:bw - 4]
+            win.addstr(bh - 1, 2, footer, curses.A_DIM)
+        except curses.error:
+            pass
+        win.noutrefresh()
+        stdscr.noutrefresh()
+        curses.doupdate()
+        ch = _next_key()
+        if ch in (27,):
+            return None
+        if ch in (10, 13):
+            return shown[sel] if shown else None
+        if ch == curses.KEY_RESIZE:
+            continue
+        if ch in (curses.KEY_UP, ord("k")):
+            sel = max(0, sel - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            sel = min(len(shown) - 1, sel + 1)
+        elif ch == curses.KEY_PPAGE:
+            sel = max(0, sel - visible)
+        elif ch == curses.KEY_NPAGE:
+            sel = min(len(shown) - 1, sel + visible)
+        elif ch in (8, 127, curses.KEY_BACKSPACE):
+            filt = filt[:-1]
+            shown = [f for f in files if filt in f.lower()] or list(files)
+            sel = 0
+        elif 32 <= ch < 127:
+            filt += chr(ch).lower()
+            shown = [f for f in files if filt in f.lower()] or list(files)
+            sel = 0
 
 
 def export_chat(state):
@@ -1868,6 +2160,8 @@ def chat_screen(stdscr, state):
     paste_lines = 1
     paste_buf = bytearray()
     paste_len = 0
+    paste_capped = False   # paste mencapai MAX_PASTE_LEN → sisa dibuang
+    paste_skipped = 0      # jumlah karakter yang dibuang (melebihi batas)
     last_paste_render = 0.0
     last_paste_activity = 0.0
     worker = None
@@ -1891,6 +2185,11 @@ def chat_screen(stdscr, state):
     rain = _MatrixRain(1, 1)   # hujan matrix di latar sidebar sesi
     flash = ""
     flash_t = 0.0
+    undo_stack = []      # snapshot git+pesan sebelum tiap kirim (/undo)
+    redo_stack = []      # hasil undo yang bisa dikembalikan (/redo)
+    sug_sel = 0          # index terpilih di popup sugesti slash (/…)
+    sug_win = None       # window popup sugesti (dibuat saat aktif)
+    sug_rect = (0, 0, 0, 0)  # posisi popup terakhir (y, h, x, w) utk erase
 
     STYLE_ATTR = {
         "user":        curses.color_pair(2) | curses.A_BOLD,
@@ -1911,6 +2210,14 @@ def chat_screen(stdscr, state):
         "md_code":     curses.color_pair(11),
         "md_bullet":   curses.color_pair(12),
         "md_quote":    curses.color_pair(13),
+        "system":      curses.A_BOLD | curses.color_pair(16),
+        "system_lbl":  curses.A_BOLD | curses.color_pair(16),
+        "diff":        curses.A_DIM,
+        "diff_add":    curses.color_pair(14),
+        "diff_del":    curses.color_pair(15),
+        "diff_hunk":   curses.color_pair(16),
+        "diff_hdr":    curses.A_BOLD | curses.color_pair(17),
+        "diff_ctx":    curses.color_pair(18),
     }
 
     md_seg_cache = {}
@@ -1919,6 +2226,330 @@ def chat_screen(stdscr, state):
         nonlocal flash, flash_t
         flash = t
         flash_t = time.time()
+
+    def take_snapshot():
+        """Snapshot git + pesan sebelum satu giliran dikirim (untuk /undo).
+        Redo di-reset karena ada aksi baru (ala opencode)."""
+        nonlocal undo_stack, redo_stack
+        undo_stack.append({
+            "git": git_snapshot(state.cwd),
+            "msgs": [dict(m) for m in state.messages],
+            "title": state.session_title,
+        })
+        if len(undo_stack) > 30:
+            undo_stack.pop(0)
+        redo_stack.clear()
+
+    def do_undo():
+        nonlocal undo_stack, redo_stack, dirty, follow
+        if not undo_stack:
+            set_flash("tidak ada yang bisa di-undo")
+            return
+        snap = undo_stack.pop()
+        g = snap.get("git")
+        if g:
+            if g.get("patch"):
+                git_apply(state.cwd, g["patch"], revert=True)
+            for f in g.get("untracked") or []:
+                p = Path(state.cwd) / f
+                try:
+                    if p.is_dir() and not p.is_symlink():
+                        import shutil as _sh
+                        _sh.rmtree(p)
+                    elif p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+        redo_stack.append({
+            "git": g,
+            "msgs": [dict(m) for m in state.messages],
+            "title": state.session_title,
+        })
+        state.messages = [dict(m) for m in snap["msgs"]]
+        state.session_title = snap.get("title", state.session_title)
+        load_msgs()
+        refresh_sidebar()
+        follow = True
+        dirty = True
+        try:
+            state.save_session()
+        except OSError:
+            pass
+        set_flash("undo ✓ " + ("(file direvert)" if g else "(pesan saja)"))
+
+    def do_redo():
+        nonlocal undo_stack, redo_stack, dirty, follow
+        if not redo_stack:
+            set_flash("tidak ada yang bisa di-redo")
+            return
+        snap = redo_stack.pop()
+        g = snap.get("git")
+        if g and g.get("patch"):
+            git_apply(state.cwd, g["patch"], revert=False)
+        undo_stack.append({
+            "git": g,
+            "msgs": [dict(m) for m in state.messages],
+            "title": state.session_title,
+        })
+        state.messages = [dict(m) for m in snap["msgs"]]
+        state.session_title = snap.get("title", state.session_title)
+        load_msgs()
+        refresh_sidebar()
+        follow = True
+        dirty = True
+        try:
+            state.save_session()
+        except OSError:
+            pass
+        set_flash("redo ✓")
+
+    def expand_refs(text):
+        """@path di prompt → isi file disisipkan (ala opencode references).
+        Path relatif di-resolve ke folder kerja aktif."""
+        import re as _re
+        out = []
+        for tok in _re.split(r"(@[^\s\n]+)", text):
+            if tok.startswith("@") and len(tok) > 1:
+                p = Path(os.path.expanduser(tok[1:]))
+                if not p.is_absolute():
+                    p = Path(state.cwd) / p
+                if p.is_file():
+                    try:
+                        content = p.read_text(encoding="utf-8",
+                                              errors="replace")[:30000]
+                        out.append(f"\n### {tok[1:]} (referensi file)\n"
+                                   f"```\n{content}\n```\n")
+                        continue
+                    except OSError:
+                        pass
+            out.append(tok)
+        return "".join(out)
+
+    def run_bang(cmd):
+        """!command — jalankan shell, hasil masuk konteks (ala opencode)."""
+        nonlocal dirty, follow
+        if not cmd:
+            set_flash("! diikuti perintah (mis. !ls -la)")
+            return
+        msgs.append({"role": "user", "text": f"! {cmd}"})
+        msgs.append({"role": "tool", "text": f"$ {cmd}"})
+        state.messages.append({"role": "user", "content": f"! {cmd}"})
+        dirty = True
+        try:
+            proc = subprocess.run(["bash", "-c", cmd], cwd=str(state.cwd),
+                                  capture_output=True, text=True, timeout=180)
+            out = proc.stdout or ""
+            err = proc.stderr or ""
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            out, err, code = "", "timeout (> 180 dtk)", 124
+        except Exception as e:  # noqa: BLE001
+            out, err, code = "", str(e), 1
+        result = out.strip()
+        if err.strip():
+            result = (result + "\n" if result else "") + err.strip()
+        if not result:
+            result = "(tanpa output)"
+        if len(result) > 6000:
+            result = result[:6000] + "\n[output terpotong]"
+        msgs.append({"role": "tool_out",
+                     "text": f"-> exit {code}: {result.replace(chr(10), ' ')[:400]}"})
+        state.messages.append({"role": "tool",
+                               "content": f"$ {cmd}\n[exit {code}]\n{result}"})
+        follow = True
+        dirty = True
+        set_flash(f"! {cmd.split()[0]} → exit {code}")
+
+    def do_editor():
+        """/editor — compose pesan di $EDITOR (ala opencode)."""
+        nonlocal prompt_buf, dirty
+        global _input_q
+        import tempfile
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
+        tmp = Path(tempfile.mkstemp(suffix=".md")[1])
+        try:
+            tmp.write_text(prompt_buf, encoding="utf-8")
+        except OSError:
+            pass
+        # matikan reader input dulu — biar keystroke editor TIDAK dicuri
+        _input_stop.set()
+        try:
+            th = _input_reader_th
+            if th is not None:
+                th.join(timeout=1)
+        except Exception:  # noqa: BLE001
+            pass
+        curses.endwin()
+        try:
+            subprocess.run([editor, str(tmp)], check=False)
+        except OSError as e:
+            set_flash(f"gagal buka editor {editor}: {e}")
+        try:
+            text = tmp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        # hidupkan lagi reader + kunci terminal ke mode curses
+        _input_stop.clear()
+        _input_q = queue.Queue()
+        _ensure_reader()
+        _sync_term_size()
+        dirty = True
+        if text.strip():
+            prompt_buf = text
+            set_flash("pesan dari $EDITOR — Enter kirim")
+        else:
+            set_flash("editor kosong — tidak ada perubahan")
+
+    def do_init():
+        """/init — generate AGENTS.md dari struktur proyek (ala opencode).
+        Jalan di thread worker: UI tetap responsif, progres via out_q."""
+        nonlocal streaming, follow, dirty, worker
+        root = Path(state.cwd)
+        names = sorted(p.name for p in root.rglob("*")
+                       if p.is_dir() and not any(
+                           s in p.parts for s in
+                           (".git", "node_modules", "__pycache__", ".denzyx",
+                            ".venv", "venv")) and
+                       len(p.parts) - len(root.parts) <= 3)
+        files = sorted(str(p.relative_to(root)) for p in root.rglob("*")
+                       if p.is_file() and not any(
+                           s in p.parts for s in
+                           (".git", "node_modules", "__pycache__", ".venv",
+                            "venv", "dist", "build")))
+        prompt = (f"Analisis proyek di {root}. Berdasarkan daftar folder "
+                  f"dan file di bawah, buat file AGENTS.md (markdown) berisi:\n"
+                  f"- ringkasan proyek\n- perintah build/test/lint yang relevan\n"
+                  f"- konvensi kode yang terlihat\n- hal penting untuk AI coding agent\n\n"
+                  f"Folder (maks 3 level):\n{', '.join(names[:300])}\n\n"
+                  f"File:\n{', '.join(files[:400])}\n\n"
+                  "Balas isi AGENTS.md saja, tanpa fenced block.")
+        msgs.append({"role": "user", "text": "/init — generate AGENTS.md"})
+        msgs.append({"role": "reasoning", "text": "menganalisis proyek…"})
+        follow = True
+        dirty = True
+        streaming = True
+
+        def _worker():
+            stop = threading.Event()
+            out_q.put(("note", "menganalisis struktur proyek…"))
+            try:
+                content, _r, _c = _api_stream(
+                    state, [{"role": "user", "content": prompt}],
+                    None, out_q, stop, timeout=300, visible=False)
+            except Exception as e:  # noqa: BLE001
+                out_q.put(("error", f"/init gagal: {e}"))
+                out_q.put(("done", None))
+                return
+            try:
+                agents = root / "AGENTS.md"
+                agents.write_text((content or "").strip() + "\n",
+                                  encoding="utf-8")
+                out_q.put(("tool_result",
+                           ("AGENTS.md", str(agents),
+                            f"AGENTS.md dibuat ({len(content or '')} char)",
+                            "")))
+            except OSError as e:
+                out_q.put(("error", f"/init gagal menulis: {e}"))
+            out_q.put(("done", None))
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+    def do_read(path):
+        """Baca file & sisipkan isinya ke konteks (ala opencode /read)."""
+        nonlocal dirty, follow
+        p = Path(os.path.expanduser(path))
+        if not p.is_absolute():
+            p = Path(state.cwd) / p
+        if not p.exists():
+            set_flash(f"file tidak ada: {p}")
+            return
+        if p.is_dir():
+            items = sorted(x.name for x in p.iterdir())[:400]
+            body = f"# {p}\n\n" + "\n".join(items)
+        else:
+            try:
+                body = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                set_flash(f"gagal baca {p}: {e}")
+                return
+        if len(body) > 30000:
+            body = body[:30000] + "\n[terpotong]"
+        msgs.append({"role": "user", "text": f"/read {p}"})
+        msgs.append({"role": "tool_out", "text": f"-> {len(body)} char dari {p}"})
+        state.messages.append({"role": "user",
+                               "content": f"[isi {p} — referensi]\n{body}"})
+        follow = True
+        dirty = True
+        set_flash(f"📄 {p} dimasukkan ke konteks ✓")
+
+    def do_themes():
+        """/themes — pilih preset tema, tulis ke theme.md (ala opencode)."""
+        nonlocal dirty
+        presets = {
+            "DENZYX biru/cyan (default)": {
+                "banner": (51, -1), "user": (2, -1), "assistant": (7, -1),
+                "yellow": (3, -1), "error": (196, -1),
+                "label_user": (7, 24), "label_ai": (7, 27),
+                "label_tool": (7, 30), "label_error": (7, 196),
+                "md_heading": (39, -1), "md_code": (3, -1),
+                "md_bullet": (2, -1), "md_quote": (39, -1),
+                "diff_add": (2, -1), "diff_del": (1, -1),
+                "diff_hunk": (39, -1), "diff_hdr": (3, -1),
+                "diff_ctx": (7, -1),
+            },
+            "Hijau terminal": {
+                "banner": (2, -1), "user": (3, -1), "assistant": (7, -1),
+                "yellow": (3, -1), "error": (9, -1),
+                "label_user": (7, 22), "label_ai": (7, 22),
+                "label_tool": (7, 22), "label_error": (7, 9),
+                "md_heading": (2, -1), "md_code": (3, -1),
+                "md_bullet": (2, -1), "md_quote": (6, -1),
+                "diff_add": (2, -1), "diff_del": (1, -1),
+                "diff_hunk": (6, -1), "diff_hdr": (3, -1), "diff_ctx": (7, -1),
+            },
+            "Amber/ungu": {
+                "banner": (214, -1), "user": (99, -1), "assistant": (7, -1),
+                "yellow": (11, -1), "error": (9, -1),
+                "label_user": (7, 60), "label_ai": (7, 54),
+                "label_tool": (7, 94), "label_error": (7, 9),
+                "md_heading": (214, -1), "md_code": (11, -1),
+                "md_bullet": (99, -1), "md_quote": (214, -1),
+                "diff_add": (2, -1), "diff_del": (1, -1),
+                "diff_hunk": (214, -1), "diff_hdr": (11, -1),
+                "diff_ctx": (7, -1),
+            },
+        }
+        items = [(name, "") for name in presets]
+        sel = 0
+        while True:
+            ch, sel = menu_list(stdscr, " Tema ", items, sel, "",
+                                " ↑↓ pilih • Enter: pakai • ESC: batal ")
+            if ch in (27,):
+                return
+            if ch in (curses.KEY_UP, ord("k")):
+                sel = (sel - 1) % len(items)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                sel = (sel + 1) % len(items)
+            elif ch in (10, 13):
+                name = list(presets)[sel]
+                try:
+                    THEME_FILE.write_text(
+                        "\n".join(f"{k} = {v[0]},{v[1]}"
+                                  for k, v in presets[name].items())
+                        + "\n", encoding="utf-8")
+                    _init_theme_pairs(load_theme())
+                    dirty = True
+                    set_flash(f"tema → {name} ✓")
+                except OSError as e:
+                    set_flash(f"gagal menulis tema: {e}")
+                return
+            elif ch == curses.KEY_RESIZE:
+                pass
 
     def load_msgs():
         msgs.clear()
@@ -1930,6 +2561,13 @@ def chat_screen(stdscr, state):
                 if rc:
                     msgs.append({"role": "reasoning", "text": rc})
                 msgs.append({"role": "assistant", "text": m["content"]})
+            elif m["role"] == "system" and m["content"]:
+                msgs.append({"role": "system", "text": m["content"]})
+            elif m["role"] == "tool" and m.get("diff"):
+                msgs.append({"role": "tool", "text":
+                             (m["content"] or "").splitlines()[0][:120]
+                             if (m["content"] or "").strip() else "✎ file diubah"})
+                msgs.append({"role": "diff", "text": m["diff"]})
 
     load_msgs()
 
@@ -1949,16 +2587,21 @@ def chat_screen(stdscr, state):
 
     def commit_paste():
         nonlocal prompt_buf, paste_mode, paste_buf, paste_len, \
-            paste_lines, paste_changed
+            paste_lines, paste_changed, paste_capped, paste_skipped
         prompt_buf += paste_buf.decode("utf-8", "replace")
         # kalau \x1b[201~ ikut tertelan (write parsial ke pty): buang sisa
         if prompt_buf.endswith("[201~"):
             prompt_buf = prompt_buf[:-5]
+        if paste_capped:
+            set_flash(f"paste dibatasi: {paste_len} huruf masuk · "
+                      f"{paste_skipped} dibuang (maks {MAX_PASTE_LEN})")
         paste_buf = bytearray()
         paste_len = 0
         paste_lines = 1
         paste_mode = False
         paste_changed = False
+        paste_capped = False
+        paste_skipped = 0
 
     refresh_sidebar()  # sidebar langsung terisi (sebelumnya kosong sampai event "done")
 
@@ -2204,7 +2847,14 @@ def chat_screen(stdscr, state):
     def send_prompt(text):
         """Kirim prompt ke API: append user+assistant, mulai worker baru.
         Dipakai Enter langsung ATAU drain antrean (auto-kirim)."""
-        nonlocal streaming, follow, dirty
+        nonlocal streaming, follow, dirty, worker
+        # snapshot git + pesan utk /undo (sebelum giliran ini jalan)
+        take_snapshot()
+        # @file refs → isi file disisipkan (ala opencode)
+        text = expand_refs(text)
+        if state.plan_mode:
+            text = ("[MODE RENCANA] JANGAN ubah file apa pun. Hanya analisis "
+                    "dan usulkan rencana langkah demi langkah.\n\n" + text)
         # buang event basi dari stream yang di-stop (ESC)
         try:
             while True:
@@ -2240,14 +2890,19 @@ def chat_screen(stdscr, state):
         if streaming or not msg_queue:
             return
         msg = msg_queue.pop(0)
-        if msg.startswith("/") and "\n" not in msg and not msg.startswith("//"):
+        is_cmd = ((msg.startswith("/") and not msg.startswith("//"))
+                  or (msg.startswith("!") and not msg.startswith("!!")))
+        if is_cmd and "\n" not in msg:
             # jalankan sebagai perintah setelah idle
             for i in range(len(msgs) - 1, -1, -1):
                 if msgs[i]["role"] == "queued" and msgs[i]["text"] == msg:
                     del msgs[i]
                     break
             dirty = True
-            do_slash(msg)
+            if msg.startswith("/"):
+                do_slash(msg)
+            else:
+                run_bang(msg[1:])
             if msg_queue:
                 set_flash(f"📥 perintah dijalankan — {len(msg_queue)} tersisa")
             else:
@@ -2328,13 +2983,34 @@ def chat_screen(stdscr, state):
                          "Status: " + ("terisi" if state.system else "kosong")])
         elif c == "/rename":
             do_rename()
-        elif c == "/theme":            dialog_note(stdscr, " Tema ",
-                        [f"{APP_NAME} memakai tema bawaan terminal.",
-                         "Warna: Pengaturan > Pengaturan."])
+        elif c == "/theme":
+            do_themes()
+        elif c == "/plan":
+            state.plan_mode = not state.plan_mode
+            set_flash(f"mode RENCANA: {'ON (tidak akan ubah file)' if state.plan_mode else 'OFF'}")
+        elif c == "/read":
+            val = input_line(stdscr, "Baca file (path):", "")
+            if val and val != "RESIZE":
+                do_read(val.strip())
+        elif c == "/init":
+            do_init()
+        elif c == "/undo":
+            do_undo()
+        elif c == "/redo":
+            do_redo()
+        elif c == "/editor":
+            do_editor()
+        elif c == "/reason":
+            state.show_reasoning = not state.show_reasoning
+            set_flash(f"PIKIR: {'ditampilkan' if state.show_reasoning else 'disembunyikan'}")
+        elif c == "/details":
+            state.show_details = not state.show_details
+            set_flash(f"detail tool: {'ditampilkan' if state.show_details else 'dikolaps'}")
         elif c == "/compact":
             dialog_note(stdscr, " Kompaksi ",
-                        ["Kompaksi belum didukung.",
-                         "Sesi disimpan utuh di ~/.denzyx_sessions."])
+                        ["Riwayat lama akan diringkas oleh model,",
+                         "riwayat baru tetap utuh di ~/.denzyx_sessions.",
+                         "Belum aktif di build ini."])
         else:
             dialog_note(stdscr, " Perintah tidak dikenal ",
                         [f"'{cmd}' bukan perintah.", "Ketik /help untuk daftar."])
@@ -2353,9 +3029,22 @@ def chat_screen(stdscr, state):
             role, text = m["role"], m["text"]
             if role == "reasoning" and not state.show_reasoning:
                 continue  # PIKIR disembunyikan — toggle ctrl+k munculkan lagi
+            # /details OFF → kolaps output tool panjang jadi beberapa baris
+            if not state.show_details and role in ("tool", "tool_out", "diff"):
+                raw = text
+                if len(raw.splitlines()) > 6:
+                    keep = "\n".join(raw.splitlines()[:5])
+                    text = (f"{keep}\n… [output {len(raw.splitlines())} "
+                            f"baris — /details untuk lihat]")
             ck = (role, text, width)
             if ck not in wrap_cache:
-                if role in ("user", "assistant"):
+                if role == "diff":
+                    block = [("system_lbl", "── ✎ DIFF ──")]
+                    for ln in text.splitlines():
+                        kind = _diff_line_kind(ln)
+                        block += [((kind if kind != "diff_ctx" else "diff"),
+                                   x) for x in wrap_text(ln, width)]
+                elif role in ("user", "assistant"):
                     label = (("user_label", "── KAMU ──") if role == "user"
                              else ("ai_label", "── AI DENZYX ──"))
                     block = [label]
@@ -2378,6 +3067,9 @@ def chat_screen(stdscr, state):
                     elif role == "queued":
                         block = [("queued_lbl", "── 📥 ANTREAN ──")]
                         block += [("queued", x) for x in wrapped]
+                    elif role == "system":
+                        block = [("system_lbl", "── ⚙ SISTEM ──")]
+                        block += [("system", x) for x in wrapped]
                     else:
                         block = [("ai_label", "── AI DENZYX ──")]
                         block += [("assistant", x) for x in wrapped]
@@ -2459,6 +3151,106 @@ def chat_screen(stdscr, state):
             pass
         win_status.noutrefresh()
 
+    def _compute_sug():
+        """Cocokkan prompt_buf saat ini dgn daftar perintah slash.
+        Aktif hanya saat mengetik perintah (awal '/', satu baris, tanpa
+        argumen/spasi). Return list (name, desc) terfilter."""
+        if (prompt_buf.startswith("/") and "\n" not in prompt_buf
+                and not prompt_buf.startswith("//")
+                and " " not in prompt_buf):
+            tok = prompt_buf[1:].lower()
+            return [c for c in SLASH_COMMANDS
+                    if c[0][1:].lower().startswith(tok)]
+        return []
+
+    def render_suggestions(h, w, sb):
+        """Sugesti perintah slash (ala opencode): muncul saat ketik '/'.
+        Bila sidebar tampil → digambar DI DALAM panel sesi (win_side),
+        menggantikan daftar sesi sementara. Bila sidebar disembunyikan
+        (ctrl+b) → popup di area output (di atas input), tidak menutupi
+        kolom pesan. ↑↓ pilih · Tab lengkapi · Enter jalankan."""
+        nonlocal sug_win, sug_rect, sug_sel, dirty
+        sug = _compute_sug()
+        if not sug:
+            if sug_win is not None:
+                y, nh, x, nw = sug_rect
+                try:
+                    tmp = curses.newwin(nh, nw, y, x)
+                    tmp.erase()
+                    tmp.noutrefresh()
+                except curses.error:
+                    pass
+                sug_win = None
+                dirty = True  # area chat di bawah popup harus di-redraw
+            return
+        n = min(len(sug), 10)
+        sug_sel = max(0, min(sug_sel, n - 1))
+        if sb_on:
+            # sugesti tampil di panel sesi (sidebar) — tidak menutupi chat
+            try:
+                sh, sw = win_side.getmaxyx()
+                win_side.erase()
+                draw_frame(win_side, " ⌘ perintah ")
+                maxitems = max(1, sh - 3)
+                start = 0
+                if n > maxitems:
+                    start = min(max(0, sug_sel - 1), n - maxitems)
+                y = 2
+                for i in range(start, min(n, start + maxitems)):
+                    name, desc = sug[i]
+                    if i == sug_sel:
+                        marker, attr = "▶", curses.A_BOLD | curses.color_pair(1)
+                    else:
+                        marker, attr = " ", 0
+                    win_side.addstr(y, 1,
+                                    f"{marker} {clip_width(name + ' ' + desc, sw - 4)}",
+                                    attr)
+                    y += 1
+                try:
+                    win_side.addnstr(sh - 1, 1, "↑↓ pilih · Tab · Enter",
+                                     sw - 2, curses.A_DIM)
+                except curses.error:
+                    pass
+                win_side.noutrefresh()
+            except curses.error:
+                pass
+            # popup lama di area output (kalau sempat dibuat) dihapus
+            if sug_win is not None:
+                y, nh, x, nw = sug_rect
+                try:
+                    tmp = curses.newwin(nh, nw, y, x)
+                    tmp.erase()
+                    tmp.noutrefresh()
+                except curses.error:
+                    pass
+                sug_win = None
+                dirty = True
+            return
+        # sidebar disembunyikan (ctrl+b) → popup di area output,
+        # di atas input — kolom pesan tidak ikut ketutup karena
+        # noutrefresh-nya SELALU dijalankan sebelum popup ini.
+        pw = min(w - 2, 48)
+        ph = n + 2
+        y = h - 7 - ph
+        x = max(0, (w - pw) - 8)
+        if y < 2:
+            y = 2
+        try:
+            sug_win = curses.newwin(ph, pw, y, x)
+            sug_win.erase()
+            sug_win.border()
+            for i in range(n):
+                name, desc = sug[i]
+                row = clip_width(f" {name}  {desc}", pw - 2)
+                if i == sug_sel:
+                    sug_win.addnstr(i + 1, 1, row, pw - 2, curses.A_REVERSE)
+                else:
+                    sug_win.addnstr(i + 1, 1, row, pw - 2)
+            sug_win.noutrefresh()
+            sug_rect = (y, ph, x, pw)
+        except curses.error:
+            pass
+
     def render_input():
         try:
             in_h, _ = win_in.getmaxyx()
@@ -2469,7 +3261,12 @@ def chat_screen(stdscr, state):
                 # tidak tergantung lebar terminal (status bar bisa penuh)
                 draw_frame(win_in, f" {flash} ", "")
             elif paste_mode:
-                draw_frame(win_in, " [PASTE] teks masuk apa adanya — ESC: batal ", "")
+                if paste_capped:
+                    draw_frame(win_in,
+                               f" [PASTE] {paste_len}/{MAX_PASTE_LEN} huruf · "
+                               f"{paste_skipped} dibuang — ESC: batal ", "")
+                else:
+                    draw_frame(win_in, " [PASTE] teks masuk apa adanya — ESC: batal ", "")
             else:
                 draw_frame(win_in, " input — Enter kirim · Shift+Enter baris baru ", "")
             tail_str = prompt_buf
@@ -2590,6 +3387,7 @@ def chat_screen(stdscr, state):
         render_input()
         win_in.noutrefresh()
         win_out.noutrefresh()
+        render_suggestions(h, w, sb)
         curses.doupdate()
 
         if streaming:
@@ -2663,11 +3461,13 @@ def chat_screen(stdscr, state):
                         follow = True
                         dirty = True
                     elif kind == "tool_result":
-                        _name, _args, result = text
+                        _name, _args, result, diff = text
                         active_tool = None  # tool selesai dijalankan
                         had_activity = True
                         shown = result.replace("\n", " ")[:400]
                         msgs.append({"role": "tool_out", "text": f"-> {shown}"})
+                        if diff:
+                            msgs.append({"role": "diff", "text": diff})
                         dirty = True
                     elif kind == "note":
                         msgs.append({"role": "reasoning", "text": text})
@@ -2702,7 +3502,7 @@ def chat_screen(stdscr, state):
             # \x1b[201~ hilang (write terminal parsial ke pty), paste
             # tetap dikomit otomatis, bukan nyangkut selamanya.
             # Saat sidebar tampil: timeout pendek biar hujan matrix hidup.
-            ch = _next_key(0.06 if sb_on else (0.25 if paste_mode else -1))
+            ch = _next_key(0.06 if sb_on else (0.05 if paste_mode else -1))
 
         if ch is None:
             if sb_on:
@@ -2738,6 +3538,8 @@ def chat_screen(stdscr, state):
             paste_lines = 1
             paste_buf = bytearray()
             paste_len = 0
+            paste_capped = False
+            paste_skipped = 0
             last_paste_render = 0.0
             dirty = True
             continue
@@ -2749,11 +3551,15 @@ def chat_screen(stdscr, state):
         if paste_mode:
             # semua karakter paste masuk apa adanya; newline = bagian teks.
             # Ditampung di bytearray dulu (concat string per char = O(n²)).
+            # Lewat MAX_PASTE_LEN: teks tidak lagi disimpan (biar paste
+            # raksasa cepat selesai), yang masuk hanya dihitung buat laporan.
             if ch in (10, 13):
-                if paste_len < MAX_INPUT:
+                if paste_len < MAX_PASTE_LEN:
                     paste_buf.append(10)
                     paste_len += 1
                     paste_lines += 1
+                else:
+                    paste_skipped += 1
                 paste_changed = True
                 pending_chars += 1
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -2784,9 +3590,11 @@ def chat_screen(stdscr, state):
             elif 32 <= ch < 127 or 127 < ch <= 255:
                 # byte teks asli (ASCII + UTF-8) — special key ncurses
                 # (>255: panah, PgUp/PgDn, dll) DIABAIKAN, bukan crash.
-                if paste_len < MAX_INPUT:
+                if paste_len < MAX_PASTE_LEN:
                     paste_buf.append(ch)
                     paste_len += 1
+                else:
+                    paste_skipped += 1
                 paste_changed = True
                 pending_chars += 1
             continue
@@ -2966,7 +3774,14 @@ def chat_screen(stdscr, state):
         if ch == 14 and not streaming:  # ctrl+n → sesi baru
             new_session()
             continue
-        if ch == 9:        # tab → toggle agent
+        if ch == 9:        # tab → toggle agent, ATAU lengkapi sugesti slash
+            _sg = _compute_sug()
+            if _sg:
+                name = _sg[min(sug_sel, len(_sg) - 1)][0]
+                prompt_buf = name + " "
+                sug_sel = 0
+                dirty = True
+                continue
             state.agent_mode = not state.agent_mode
             set_flash(f"agent mode: {'ON' if state.agent_mode else 'OFF'}")
             continue
@@ -3017,6 +3832,15 @@ def chat_screen(stdscr, state):
             follow = True
             continue
         if ch in (curses.KEY_UP, curses.KEY_DOWN):
+            _sg = _compute_sug()
+            if _sg:
+                # popup sugesti aktif → navigasi daftar, bukan scroll/sidebar
+                n = len(_sg)
+                if ch == curses.KEY_UP:
+                    sug_sel = (sug_sel - 1) % n
+                else:
+                    sug_sel = (sug_sel + 1) % n
+                continue
             if not prompt_buf and not streaming and sb_on:
                 # input kosong + sidebar tampil → navigasi daftar sesi
                 if ch == curses.KEY_UP:
@@ -3034,6 +3858,14 @@ def chat_screen(stdscr, state):
                         follow = True
             continue
         if ch in (10, 13):
+            _sg = _compute_sug() if not streaming else []
+            if _sg:
+                # Enter di popup sugesti → jalankan perintah terpilih
+                name = _sg[min(sug_sel, len(_sg) - 1)][0]
+                prompt_buf = ""
+                do_slash(name)
+                dirty = True
+                continue
             if not prompt_buf:
                 # input kosong + Enter → buka sesi dari sidebar
                 if sb_on and not streaming:
@@ -3097,8 +3929,9 @@ def chat_screen(stdscr, state):
             # baris "📥 ANTREAN". Perintah /... tidak ikut diantre —
             # tunggu sampai idle (slash saat streaming jadi teks mentah).
             if streaming:
-                if msg.startswith("/") and "\n" not in msg \
-                        and not msg.startswith("//"):
+                if (msg.startswith("/") or msg.startswith("!")) \
+                        and "\n" not in msg and not msg.startswith("//") \
+                        and not msg.startswith("!!"):
                     set_flash("tunggu jawaban selesai utk perintah " + msg.split()[0])
                     continue
                 msg_queue.append(msg)
@@ -3108,11 +3941,15 @@ def chat_screen(stdscr, state):
                 dirty = True
                 set_flash("📥 masuk antrean — auto-kirim setelah jawaban ✓")
                 continue
-            # slash command: hanya kalau satu baris (paste multi-baris
-            # yang diawali "/" tidak boleh tertangkap)
+            # slash / bang command: hanya kalau satu baris (paste multi-baris
+            # yang diawali "/" atau "!" tidak boleh tertangkap)
             if msg.startswith("/") and "\n" not in msg and not msg.startswith("//"):
                 prompt_buf = ""
                 do_slash(msg)
+                continue
+            if msg.startswith("!") and "\n" not in msg and not msg.startswith("!!"):
+                prompt_buf = ""
+                run_bang(msg[1:])
                 continue
             prompt_buf = ""
             send_prompt(msg)
@@ -3552,19 +4389,7 @@ def main(stdscr):
         for k, v in th.items():
             if v[0] > 15:
                 th[k] = (curses.COLOR_RED, v[1])
-    curses.init_pair(1, th["banner"][0], th["banner"][1])       # highlight/banner/judul/footer
-    curses.init_pair(2, th["user"][0], th["user"][1])           # user
-    curses.init_pair(3, th["assistant"][0], th["assistant"][1]) # assistant
-    curses.init_pair(4, th["yellow"][0], th["yellow"][1])       # model list
-    curses.init_pair(5, th["error"][0], th["error"][1])         # error
-    curses.init_pair(6, th["label_user"][0], th["label_user"][1])    # label KAMU
-    curses.init_pair(7, th["label_ai"][0], th["label_ai"][1])       # label AI DENZYX
-    curses.init_pair(8, th["label_tool"][0], th["label_tool"][1])   # label TOOL
-    curses.init_pair(9, th["label_error"][0], th["label_error"][1]) # label ERROR
-    curses.init_pair(10, th["md_heading"][0], th["md_heading"][1])  # heading markdown
-    curses.init_pair(11, th["md_code"][0], th["md_code"][1])        # kode markdown
-    curses.init_pair(12, th["md_bullet"][0], th["md_bullet"][1])    # bullet markdown
-    curses.init_pair(13, th["md_quote"][0], th["md_quote"][1])      # kutipan markdown
+    _init_theme_pairs(th)
     try:
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
     except curses.error:

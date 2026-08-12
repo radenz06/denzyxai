@@ -18,6 +18,8 @@ Menu:
 CLI:
   python3 admin-denz.py add <user> <pass> [hari]
   python3 admin-denz.py addadmin <user> | rmadmin <user>
+  python3 admin-denz.py bans | unban <ip> | block <ip>
+  python3 admin-denz.py visitors [ip|cari] | visitors-clear
 """
 
 import getpass
@@ -33,6 +35,7 @@ import lic  # noqa: E402
 import auth  # noqa: E402
 import webdenz  # noqa: E402
 import denzbot  # noqa: E402
+import waf  # noqa: E402
 
 PID_DIR = Path(__file__).resolve().parent / "webdata"
 
@@ -80,6 +83,16 @@ def _status():
           + (f"  → {_tunnel_url()}" if (tp and _alive(tp)) else ""))
     print(f"  Member     : {len(members)} total "
           f"(aktif {active} / pending {pending} / banned {banned})")
+    print(f"  WAF        : {len(waf.list_bans())} IP diblokir "
+          f"(cek via [B], unban via [C] / bot /unbanip)")
+    try:
+        import track
+        track.flush()
+        vs = track.summary()
+        print(f"  Pengunjung : {vs['total']} IP · {vs['visits']} kunjungan "
+              f"(hari ini {vs['today']}, bot {vs['bots']}) — cek via [V]")
+    except Exception:  # noqa: BLE001
+        pass
     print(f"  Harga      : Rp {cfg.get('price_idr'):,} / "
           f"{cfg.get('sub_days')} hari")
     print(f"  Owner      : {cfg.get('owner', {}).get('username')}")
@@ -186,6 +199,114 @@ def _logs(n=12):
     print("\n".join(f"  {r}" for r in rows) if rows else "  (kosong)")
 
 
+def _list_bans():
+    """Daftar IP yang diblokir WAF."""
+    bans = waf.list_bans()
+    if not bans:
+        print("  ✅ Tidak ada IP yang diblokir.")
+        return
+    for ip, e in sorted(bans.items(),
+                        key=lambda kv: kv[1].get("first_seen_ts") or 0,
+                        reverse=True):
+        print(f"  ⛔ {ip:<20} {e.get('reason')} "
+              f"({int(e.get('count') or 1)}x) [{e.get('last_seen') or '-'}]")
+        if e.get("geo"):
+            print(f"     📍 {e.get('geo')}")
+        if e.get("ua"):
+            print(f"     UA: {e.get('ua')[:80]}")
+
+
+def _unban_ip(ip):
+    ip = (ip or "").strip()
+    if not waf.unban(ip):
+        print(f"  ✖ IP tidak ada di ban list: {ip}")
+        return
+    webdenz.log_activity("waf_unban", ip)
+    denzbot.tg_notify(f"🛡️ Owner unban IP: {ip} (admin-denz)")
+    print(f"  ✅ IP {ip} dibuka blokirnya.")
+
+
+def _block_ip(ip):
+    ip = (ip or "").strip()
+    if not ip:
+        print("  Pakai: block <ip>")
+        return
+    waf.ban(ip, "manual oleh owner (admin-denz)", path="")
+    webdenz.log_activity("waf_manual_ban", ip)
+    denzbot.tg_notify(f"⛔ Owner blokir IP manual: {ip} (admin-denz)")
+    print(f"  ⛔ IP {ip} diblokir permanen.")
+
+
+def _list_visitors(n=30, q=""):
+    """Daftar pengunjung web (IP, lokasi, software)."""
+    import track
+    track.flush()
+    data = track.load()
+    if not data:
+        print("  Belum ada pengunjung tercatat.")
+        return
+    items = list(data.values())
+    if q:
+        q = q.lower()
+        items = [v for v in items if q in str(v.get("ip", "")).lower()
+                 or q in (v.get("browser") or "").lower()
+                 or q in (v.get("geo") or "").lower()]
+    items.sort(key=lambda v: v.get("last_seen") or "", reverse=True)
+    bans = waf.list_bans()
+    print(f"  {'IP':<18} {'class':<8} {'visits':<6} {'browser':<14} "
+          f"{'os':<10} {'device':<8} terakhir")
+    print("  " + "-" * 90)
+    for v in items[:n]:
+        tag = "BANNED" if v.get("ip") in bans else ""
+        print(f"  {str(v.get('ip','')):<18} {str(v.get('ip_class','')):<8} "
+              f"{int(v.get('visits') or 0):<6} "
+              f"{str(v.get('browser') or '-'):<14} "
+              f"{str(v.get('os') or '-'):<10} "
+              f"{str(v.get('device') or '-'):<8} {v.get('last_seen') or '-'} {tag}")
+        if v.get("geo") or v.get("isp"):
+            print(f"     📍 {v.get('geo') or '-'} · ISP: {v.get('isp') or '-'}")
+        if v.get("cf_ip") and v.get("cf_ip") != v.get("ip"):
+            print(f"     CF: {v.get('cf_ip')} · peer: {v.get('peer')}")
+
+
+def _visitor_detail(ip):
+    import track
+    track.flush()
+    v = track.get(ip)
+    if not v:
+        print(f"  Visitor tidak ada: {ip}")
+        return
+    print(f"  IP            : {v.get('ip')} ({v.get('ip_class')})")
+    print(f"  Peer (socket) : {v.get('peer')}")
+    print(f"  CF-Connecting : {v.get('cf_ip')}")
+    print(f"  X-Forwarded-For: {v.get('xff')}")
+    print(f"  Lokasi        : {v.get('geo') or '-'}")
+    print(f"  ISP / Org     : {v.get('isp') or '-'} / {v.get('org') or '-'}")
+    print(f"  Browser/OS    : {v.get('browser')} · {v.get('os')} · {v.get('device')}")
+    print(f"  Bot           : {'Ya' if v.get('is_bot') else 'Tidak'}")
+    print(f"  Pertama       : {v.get('first_seen')}")
+    print(f"  Terakhir      : {v.get('last_seen')}")
+    print(f"  Kunjungan     : {v.get('visits')}")
+    print(f"  Metode        : " + " ".join(f"{m}={c}" for m, c in (v.get('methods') or {}).items()))
+    print(f"  Status        : " + " ".join(f"{s}={c}" for s, c in (v.get('statuses') or {}).items()))
+    print(f"  Path          :")
+    for p in v.get("paths") or []:
+        print(f"     - {p}")
+    print(f"  Referer       :")
+    for r in v.get("referers") or []:
+        print(f"     - {r}")
+    if waf.is_banned(ip):
+        print(f"  Status WAF    : ⛔ BANNED")
+    print(f"  User-Agent    : {v.get('ua')}")
+
+
+def _clear_visitors():
+    import track
+    track.clear()
+    webdenz.log_activity("visitors_clear", "admin-denz")
+    print("  🗑️ Data pengunjung dihapus.")
+
+
 def _setup():
     cfg = webdenz.load_config()
     cfg.setdefault("owner", {})
@@ -214,6 +335,9 @@ def _setup():
     qr_url = ask("Link QR pembayaran (catbox/hosting, kosong=file lokal)",
                  cfg.get("qr_url", ""))
     cfg["qr_url"] = qr_url
+    host = ask("Bind server (keamanan: 127.0.0.1 = akses via tunnel saja)",
+               cfg.get("host", "127.0.0.1"))
+    cfg["host"] = host if host else "127.0.0.1"
     webdenz.save_config(cfg)
     print(f"  ✅ Config tersimpan: {webdenz.CONFIG_PATH}")
     if tok and chat:
@@ -302,9 +426,10 @@ def _start_tunnel():
     import subprocess
     log = PID_DIR / "tunnel.log"
     logf = open(log, "a", encoding="utf-8")
+    port = int(webdenz.load_config().get("port") or 8000)
     proc = subprocess.Popen(
-        [which, "tunnel", "--url", "http://localhost:8000",
-         "--protocol", "http2"],
+        [which, "tunnel", "--url", f"http://localhost:{port}",
+         "--protocol", "http2", "--no-autoupdate"],
         stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
     PID_DIR.joinpath("tunnel.pid").write_text(str(proc.pid))
     print(f"  🔄 tunnel start → pid {proc.pid} (URL menyusul ~5-10 dtk)")
@@ -363,7 +488,10 @@ def _menu():
   [3] Activate member        [8] Setup config
   [4] Ban member             [9] Test notifikasi TG
   [5] Unban member           [A] Add member langsung
+                            [B] IP diblokir WAF
+                            [C] Unban IP WAF
                             [D] Naikkan/turunkan admin
+                            [V] Pengunjung web   [W] Hapus data pengunjung
                             [R] Restart server/bot
                             [P] Ganti password lisensi
                             [T] Start tunnel     [U] URL tunnel
@@ -390,6 +518,10 @@ def _menu():
         _setup()
     elif c == "9":
         _test_tg()
+    elif c == "b":
+        _list_bans()
+    elif c == "c":
+        _unban_ip(input("  IP yang mau di-unban: ").strip())
     elif c == "a":
         _add_member(input("  username: ").strip(),
                     input("  password: ").strip(),
@@ -398,6 +530,10 @@ def _menu():
         _set_admin(input("  username: ").strip(),
                    admin=input("  jadikan admin? (y/n): ").strip().lower()
                    == "y")
+    elif c == "v":
+        _list_visitors(30)
+    elif c == "w":
+        _clear_visitors()
     elif c == "p":
         lic.setpass()
     elif c == "t":
@@ -447,6 +583,20 @@ def main():
             _set_admin(sys.argv[2] if len(sys.argv) > 2 else "", True)
         elif arg == "rmadmin":
             _set_admin(sys.argv[2] if len(sys.argv) > 2 else "", False)
+        elif arg == "bans":
+            _list_bans()
+        elif arg == "visitors":
+            extra = sys.argv[2] if len(sys.argv) > 2 else ""
+            if extra and (extra.count(".") >= 1 or ":" in extra):
+                _visitor_detail(extra)
+            else:
+                _list_visitors(30, q=extra)
+        elif arg == "visitors-clear":
+            _clear_visitors()
+        elif arg == "unban":
+            _unban_ip(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif arg == "block":
+            _block_ip(sys.argv[2] if len(sys.argv) > 2 else "")
         elif arg == "status":
             _status()
         elif arg == "start-bot":

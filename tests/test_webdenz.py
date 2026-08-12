@@ -7,6 +7,7 @@ import os
 import threading
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +17,10 @@ def wd(tmp_path):
     """Isolasi webdenz ke tmp dir per-test (env var + reload modul)."""
     os.environ["WEBDENZ_CONFIG"] = str(tmp_path / "webconfig.json")
     os.environ["WEBDENZ_DATA"] = str(tmp_path / "webdata")
+    os.environ["WEBDENZ_TRACK_GEO"] = "0"  # no geolokasi network di test
+    import track
+    importlib.reload(track)
+    track.set_geo(False)
     import webdenz
     importlib.reload(webdenz)
     webdenz._mkdirs()
@@ -145,6 +150,120 @@ class TestMemberStore:
         assert not webdenz.owner_token_valid("nope")
 
 
+class TestSecureConfig:
+    def test_config_encrypted_on_disk(self, wd, fresh_cfg):
+        """webconfig.json di-disk terenkripsi: rahasia tidak terbaca mentah."""
+        import webdenz
+        raw = webdenz.CONFIG_PATH.read_text(encoding="utf-8")
+        assert not raw.lstrip().startswith("{")
+        assert "ownerpw" not in raw and "test-secret" not in raw
+        # bisa dibuka lagi lewat load_config & securecfg
+        assert webdenz.load_config()["secret"] == "test-secret"
+        cfg = webdenz.securecfg.read(webdenz.CONFIG_PATH, webdenz.DATA_DIR)
+        assert cfg["secret"] == "test-secret"
+
+    def test_config_legacy_plaintext_migrate(self, wd):
+        """Config plaintext lama otomatis dibaca lalu di-migrasi ke enkripsi."""
+        import webdenz
+        webdenz.CONFIG_PATH.write_text(
+            json.dumps({"tg_chat_id": "111", "owner": {"username": "denzyx"}}),
+            encoding="utf-8")
+        cfg = webdenz.load_config()
+        assert cfg["tg_chat_id"] == "111"
+        assert cfg["owner"]["username"] == "denzyx"
+        assert cfg["secret"]  # default secret dibuat
+        raw = webdenz.CONFIG_PATH.read_text(encoding="utf-8")
+        assert not raw.lstrip().startswith("{")
+
+    def test_missing_config_creates_encrypted(self, wd):
+        import webdenz
+        cfg = webdenz.load_config()
+        assert cfg["secret"]
+        raw = webdenz.CONFIG_PATH.read_text(encoding="utf-8")
+        assert not raw.lstrip().startswith("{")
+
+    def test_unreadable_config_not_overwritten(self, wd):
+        """Regression: config yang ada tapi gagal decrypt TIDAK boleh
+        ditimpa default + secret baru (nilai asli hilang)."""
+        import base64
+        import hashlib
+        import webdenz
+        webdenz.save_config({"secret": "asli", "tg_bot_token": "token-asli"})
+        asli = webdenz.CONFIG_PATH.read_bytes()
+        # ubah key → read() gagal decrypt
+        (webdenz.DATA_DIR / ".config.key").write_bytes(
+            base64.urlsafe_b64encode(hashlib.sha256(b"beda").digest()))
+        cfg = webdenz.load_config()
+        assert cfg["secret"] != "asli"  # default in-memory (tanpa save)
+        # file asli tidak boleh berubah
+        assert webdenz.CONFIG_PATH.read_bytes() == asli
+
+    def test_setpass_unreadable_config_aborts(self, wd, monkeypatch):
+        """Regression: lic.setpass() tak boleh menghapus isi config lain
+        saat webconfig.json tidak terbaca (hanya menulis {lic})."""
+        import webdenz
+        webdenz.save_config({"secret": "asli", "tg_bot_token": "token-asli"})
+        asli = webdenz.CONFIG_PATH.read_bytes()
+
+        import lic
+        class _Stdin:
+            @staticmethod
+            def isatty():
+                return True
+        monkeypatch.setattr(lic.sys, "stdin", _Stdin())
+        monkeypatch.setattr(lic, "verify", lambda pw: True)
+        monkeypatch.setattr(lic.securecfg, "read", lambda *a, **k: None)
+        seq = iter(["lama", "baru123", "baru123"])
+        monkeypatch.setattr(lic.getpass, "getpass", lambda prompt="": next(seq))
+
+        assert lic.setpass() == 1  # gagal, config tidak disentuh
+        assert webdenz.CONFIG_PATH.read_bytes() == asli
+
+    def test_blocked_page_marquee(self, wd):
+        import webdenz
+        html = webdenz._blocked_page("endpoint scan")
+        assert "<marquee" in html
+        assert "KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN KALI" in html
+        assert "pesan dari denzyx" in html
+        assert "403" in html
+
+    def test_tls_ciphers_hardening(self, wd, tmp_path):
+        """TLS 1.2+ & cipher lemah diblokir (vuln Weak Cipher Suites)."""
+        import ssl
+        import webdenz
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "test")])
+        cert = (x509.CertificateBuilder()
+                .subject_name(name).issuer_name(name)
+                .public_key(k.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(
+                    datetime.now(timezone.utc) - timedelta(days=1))
+                .not_valid_after(
+                    datetime.now(timezone.utc) + timedelta(days=1))
+                .sign(k, hashes.SHA256()))
+        cert_f = tmp_path / "t.crt"
+        key_f = tmp_path / "t.key"
+        cert_f.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key_f.write_bytes(k.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+
+        ctx = webdenz._ssl_context(str(cert_f), str(key_f))
+        assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert ctx.options & ssl.OP_NO_COMPRESSION
+        names = [c["name"] for c in ctx.get_ciphers()]
+        assert names
+        for n in names:
+            assert not any(w in n for w in ("RC4", "3DES", "DES-CBC", "MD5"))
+            assert "GCM" in n or "CHACHA20" in n or "SHA384" in n
+
+
 class TestMemberChat:
     def test_member_chat(self, wd, monkeypatch):
         import webdenz
@@ -198,12 +317,14 @@ class TestHTTP:
         t.start()
         return srv, t
 
-    def _post(self, port, path, data=None, cookie=""):
+    def _post(self, port, path, data=None, cookie="", extra_headers=None):
         import urllib.request
         body = urllib.parse.urlencode(data or {}).encode()
+        hdrs = {"Cookie": cookie}
+        hdrs.update(extra_headers or {})
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}", data=body, method="POST",
-            headers={"Cookie": cookie})
+            headers=hdrs)
         opener = _no_redirect_opener()
         try:
             with opener.open(req, timeout=10) as r:
@@ -211,10 +332,12 @@ class TestHTTP:
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read().decode()
 
-    def _get(self, port, path, cookie=""):
+    def _get(self, port, path, cookie="", extra_headers=None):
         import urllib.request
+        hdrs = {"Cookie": cookie}
+        hdrs.update(extra_headers or {})
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}{path}", headers={"Cookie": cookie})
+            f"http://127.0.0.1:{port}{path}", headers=hdrs)
         opener = _no_redirect_opener()
         try:
             with opener.open(req, timeout=10) as r:
@@ -397,6 +520,32 @@ class TestHTTP:
             srv.shutdown()
             t.join(timeout=3)
 
+    def test_owner_delete_member(self, wd):
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        webdenz.create_member("korban", "pwkorban", "Korban")
+        webdenz.issue_member_session("korban", "1.1.1.1")
+        try:
+            cookie, tok = self._csrf(port, "/owner")
+            st, h, body = self._post(port, "/owner/login",
+                                     {"username": "denzyx", "password": "ownerpw",
+                                      "_csrf": tok}, cookie)
+            assert st in (302, 303)
+            ocookie = f"denz_owner={self._cookie_val(h.get('Set-Cookie', ''), 'denz_owner')}"
+            cookie, tok = self._csrf(port, "/owner/member/korban", ocookie)
+            st, h, body = self._post(port, "/owner/member/korban",
+                                     {"action": "delete", "_csrf": tok},
+                                     f"{ocookie}; {cookie}")
+            assert st in (302, 303) and "/owner" in h.get("Location", "")
+            assert webdenz.load_member("korban") is None
+            assert not webdenz.session_md_path("korban").exists()
+            rows = webdenz.read_log("admin")
+            assert any('"action": "delete"' in r and "korban" in r for r in rows)
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
     def test_chat_requires_login(self, wd):
         import webdenz
         srv, t = self._start(wd)
@@ -407,6 +556,257 @@ class TestHTTP:
             # api tanpa cookie → 401
             st, h, body = self._post(port, "/api/chat", {"message": "x"})
             assert st == 401
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_blocks_attacker(self, wd):
+        """Serangan (UA Burp / honeypot path) → 403 + ban IP permanen."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        ip = "203.0.113.7"
+        cf = {"CF-Connecting-IP": ip}
+        try:
+            # 1) UA alat peretas → 403 & di-ban
+            st, h, body = self._get(
+                port, "/", extra_headers={**cf, "User-Agent": "Burp Suite Free"})
+            assert st == 403
+            assert waf.is_banned(ip)
+            # 2) request berikutnya dari IP sama (path wajar) tetap 403
+            st, h, body = self._get(port, "/login", extra_headers=cf)
+            assert st == 403
+            # 3) IP lain tetap bisa akses
+            st, h, body = self._get(port, "/",
+                                    extra_headers={"CF-Connecting-IP": "198.51.100.9"})
+            assert st == 302
+            # 4) unban → akses normal lagi
+            assert waf.unban(ip)
+            st, h, body = self._get(port, "/login", extra_headers=cf)
+            assert st == 200 and "denzyx" in body.lower()
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_honeypot_403(self, wd):
+        """Path honeypot ditolak & IP (non-loopback) di-ban."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        cf = {"CF-Connecting-IP": "198.51.100.42"}
+        try:
+            st, h, body = self._get(port, "/wp-login.php", extra_headers=cf)
+            assert st == 403
+            assert waf.is_banned("198.51.100.42")
+            # path traversal juga ditolak
+            st, h, body = self._get(port, "/../../etc/passwd",
+                                    extra_headers={"CF-Connecting-IP": "198.51.100.43"})
+            assert st == 403
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_loopback_not_banned(self, wd):
+        """Koneksi lokal (tanpa CF header) tidak pernah di-ban permanen."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            st, h, body = self._get(port, "/wp-login.php")
+            assert st == 403          # request itu ditolak...
+            assert not waf.is_banned("127.0.0.1")  # ...tapi tak di-ban
+            st, h, body = self._get(port, "/login")
+            assert st == 200          # akses normal tetap jalan
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_secure_cookie_behind_tunnel(self, wd):
+        """Request via CF-Connecting-IP (edge TLS) → cookie Secure + HSTS."""
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            st, h, body = self._get(port, "/login",
+                                    extra_headers={"CF-Connecting-IP": "1.2.3.4"})
+            assert st == 200
+            assert "Secure" in h.get("Set-Cookie", "")
+            assert "Strict-Transport-Security" in h
+            # langsung (tanpa tunnel) → tanpa Secure/HSTS
+            st, h, body = self._get(port, "/login")
+            assert "Secure" not in h.get("Set-Cookie", "")
+            assert "Strict-Transport-Security" not in h
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_scan_404_bans(self, wd):
+        """Banyak 404 ke path berbeda → ban (endpoint scan)."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        cf = {"CF-Connecting-IP": "203.0.113.99"}
+        try:
+            cfg = webdenz.load_config()
+            cfg["ban_scan_threshold"] = 5
+            webdenz.save_config(cfg)
+            statuses = []
+            for i in range(5):
+                st, h, body = self._get(port, f"/x{i}/scan{i}", extra_headers=cf)
+                statuses.append(st)
+            assert statuses[-1] == 403      # ban berlaku di threshold
+            assert waf.is_banned("203.0.113.99")
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_bruteforce_bans(self, wd):
+        """Gagal login berulang → IP di-ban setelah threshold."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        cf = {"CF-Connecting-IP": "198.51.100.77"}
+        try:
+            cfg = webdenz.load_config()
+            cfg["rate_max_attempts"] = 3
+            cfg["ban_fail_threshold"] = 5
+            webdenz.save_config(cfg)
+            cookie, tok = self._csrf(port, "/login")
+            for _ in range(4):
+                st, h, body = self._post(port, "/login",
+                                         {"username": "nobody",
+                                          "password": "x", "_csrf": tok},
+                                         cookie, extra_headers=cf)
+            assert not waf.is_banned("198.51.100.77")
+            st, h, body = self._post(port, "/login",
+                                     {"username": "nobody", "password": "x",
+                                      "_csrf": tok}, cookie, extra_headers=cf)
+            assert waf.is_banned("198.51.100.77")
+            # sekarang semua request dari IP tsb → 403
+            st, h, body = self._get(port, "/login", extra_headers=cf)
+            assert st == 403
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+    def test_waf_owner_security_page(self, wd):
+        """Halaman /owner/security menampilkan ban & bisa unban."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        waf.ban("203.0.113.5", "honeypot path 'wp-login.php'", path="/wp-login.php")
+        try:
+            cookie, tok = self._csrf(port, "/owner")
+            st, h, body = self._post(port, "/owner/login",
+                                     {"username": "denzyx", "password": "ownerpw",
+                                      "_csrf": tok}, cookie)
+            assert st in (302, 303)
+            ocookie = f"denz_owner={self._cookie_val(h.get('Set-Cookie', ''), 'denz_owner')}"
+            st, h, body = self._get(port, "/owner/security", ocookie)
+            assert st == 200 and "203.0.113.5" in body and "Unban" in body
+            # unban via form
+            cookie, tok = self._csrf(port, "/owner/security", ocookie)
+            st, h, body = self._post(port, "/owner/security",
+                                     {"action": "unban", "ip": "203.0.113.5",
+                                      "_csrf": tok}, f"{ocookie}; {cookie}")
+            assert st in (200, 302, 303)
+            assert not waf.is_banned("203.0.113.5")
+        finally:
+            srv.shutdown()
+            t.join(timeout=3)
+
+
+class TestVisitors:
+    """Test panel pengunjung (helpers sendiri — jangan subclass TestHTTP,
+    supaya test TestHTTP tidak jalan dua kali)."""
+
+    def _start(self, wd):
+        import webdenz
+        srv = webdenz.ThreadingHTTPServer(("127.0.0.1", 0), webdenz.Handler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, t
+
+    def _post(self, port, path, data=None, cookie="", extra_headers=None):
+        import urllib.request
+        body = urllib.parse.urlencode(data or {}).encode()
+        hdrs = {"Cookie": cookie}
+        hdrs.update(extra_headers or {})
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}", data=body, method="POST",
+            headers=hdrs)
+        opener = _no_redirect_opener()
+        try:
+            with opener.open(req, timeout=10) as r:
+                return r.status, r.headers, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read().decode()
+
+    def _get(self, port, path, cookie="", extra_headers=None):
+        import urllib.request
+        hdrs = {"Cookie": cookie}
+        hdrs.update(extra_headers or {})
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}", headers=hdrs)
+        opener = _no_redirect_opener()
+        try:
+            with opener.open(req, timeout=10) as r:
+                return r.status, r.headers, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read().decode()
+
+    def _cookie_val(self, setcookie, name):
+        for part in str(setcookie).split(","):
+            part = part.strip()
+            if part.startswith(name + "="):
+                return part.split("=")[1].split(";")[0]
+        return ""
+
+    def _csrf_from(self, body):
+        import re
+        mt = re.search(r'name="_csrf" value="([^"]+)"', body)
+        return mt.group(1) if mt else None
+
+    def _csrf(self, port, path, cookie=""):
+        st, h, body = self._get(port, path, cookie)
+        assert st == 200
+        raw = self._cookie_val(h.get("Set-Cookie", ""), "denz_csrf")
+        tok = self._csrf_from(body)
+        assert raw and tok
+        joined = (cookie + "; " if cookie else "") + f"denz_csrf={raw}"
+        return joined, tok
+
+    def test_visitor_recorded_and_panel(self, wd):
+        """Setiap request terekam; owner panel /owner/visitors menampilkannya."""
+        import webdenz
+        import waf
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            self._get(port, "/")
+            cookie, tok = self._csrf(port, "/owner")
+            st, h, body = self._post(port, "/owner/login",
+                                     {"username": "denzyx", "password": "ownerpw",
+                                      "_csrf": tok}, cookie)
+            assert st in (302, 303)
+            ocookie = f"denz_owner={self._cookie_val(h.get('Set-Cookie', ''), 'denz_owner')}"
+            st, h, body = self._get(port, "/owner/visitors", ocookie)
+            assert st == 200 and "Pengunjung" in body
+            assert "127.0.0.1" in body
+            st, h, body = self._get(port, "/owner/visitor/127.0.0.1", ocookie)
+            assert st == 200 and "Detail Visitor" in body
+            # ban dari panel pengunjung (CSRF)
+            cookie, tok = self._csrf(port, "/owner/visitors", ocookie)
+            st, h, body = self._post(port, "/owner/visitors",
+                                     {"action": "ban", "ip": "203.0.113.5",
+                                      "_csrf": tok}, f"{ocookie}; {cookie}")
+            assert waf.is_banned("203.0.113.5")
         finally:
             srv.shutdown()
             t.join(timeout=3)

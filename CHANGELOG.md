@@ -4,6 +4,95 @@ Semua perubahan penting dicatat di sini. Format mengikuti
 [Keep a Changelog](https://keepachangelog.com/id-ID/1.1.0/) dan
 [Semantic Versioning](https://semver.org/lang/id/).
 
+## [3.3.1] - 2026-08-12
+
+### Diperbaiki
+- **Data-loss parah**: `load_config()` pernah menimpa `webconfig.json` dengan
+  nilai default + secret baru saat decrypt gagal (key berubah/file rusak),
+  sehingga token TG, password owner, QR & secret lama hilang. Kini secret
+  baru hanya dibuat saat config berhasil dibaca atau file belum ada.
+- **`lic.setpass()`** tak lagi menghapus isi config lain bila `webconfig.json`
+  tidak terbaca (sebelumnya hanya menulis `{lic}` ke file).
+- Regression test untuk kedua bug di atas ditambahkan.
+
+## [3.3.0] - 2026-08-11
+
+### Ditambahkan
+- **Pelacak pengunjung lengkap** (`track.py` + `webdenz.py`): setiap request
+  terekam — **IP public & private** (peer socket, `CF-Connecting-IP`, rantai
+  `X-Forwarded-For`/`X-Real-IP`, klasifikasi public/private/loopback),
+  **lokasi & ISP** (ipwho.is, async + cache, tanpa memblokir request),
+  **software** (User-Agent di-parse → browser, OS, device, engine; bot &
+  scanner seperti sqlmap/nikto/curl terdeteksi), path yang dikunjungi,
+  metode, kode status response, referer, pertama/terakhir kunjungan.
+  Disimpan di `webdata/visitors.json` (agregat per IP, tulis atomik,
+  flush 10 dtk) + `webdata/logs/visitors.log` (riwayat, 1 baris/menit/IP).
+- **Owner panel `/owner/visitors`**: tabel pengunjung (badge PUBLIC/PRIVATE/
+  LOOPBACK/BOT/BANNED), pencarian IP/browser/OS/lokasi, ringkasan (total,
+  hari ini, aktif 24 jam, kunjungan, bot, mobile), **detail visitor**
+  `/owner/visitor/<ip>` (semua data + riwayat + ban/unban), tombol
+  ⛔ Ban & 🗑️ hapus semua data (CSRF-protected).
+- **CLI**: `admin-denz.py visitors [ip|cari]` (daftar/detail) dan
+  `visitors-clear`; menu interaktif `[V]` & `[W]`; ringkasan di status.
+- Config baru: `track_visitors` & `track_geo` (geolokasi bisa dimatikan;
+  di test juga via env `WEBDENZ_TRACK_GEO=0`).
+
+## [3.2.0] - 2026-08-11
+
+### Ditambahkan
+- **`securecfg.py` — konfigurasi terenkripsi at-rest**: `webconfig.json`
+  kini disimpan TERENKRIPSI di disk (Fernet; key 32-byte random di
+  `webdata/.config.key`, chmod 600, gitignored). File plaintext versi lama
+  otomatis dimigrasi saat dibaca. `lic.py` ikut diperbarui agar baca/tulis
+  config lewat `securecfg`. Bisa di-override via env `WEBDENZ_CFG_KEY`.
+- **Halaman blokir WAF**: IP yang di-ban (atau terdeteksi serangan) mendapat
+  halaman 403 berisi marquee **"KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN
+  KALI😹🖕"** — pesan dari denzyx.
+- **Hardening TLS (vuln "Weak Cipher Suites")**: saat pakai
+  `ssl_cert`/`ssl_key`, server hanya menerima **TLS 1.2+** dan memblokir
+  cipher lemah (RC4, DES, 3DES, MD5, CBC, SHA-1, NULL/EXPORT, PSK/SRP/DSS,
+  LOW/CAMELLIA/SEED/IDEA) — hanya ECDHE+AESGCM / ECDHE+CHACHA20 /
+  DHE+AESGCM. `OP_CIPHER_SERVER_PREFERENCE` + kompresi TLS dimatikan
+  (anti CRIME).
+
+## [3.1.0] - 2026-08-11
+
+### Ditambahkan — WAF (Web Application Firewall) `waf.py`
+- **IP asli klien**: `CF-Connecting-IP` / `X-Forwarded-For` dipercaya HANYA
+  dari koneksi loopback (koneksi dari cloudflared) — spoof header dari akses
+  langsung tidak mempan. Rate limit/ban/log semuanya pakai IP asli.
+- **Deteksi serangan → ban IP permanen** (tersimpan `webdata/bans.json`):
+  User-Agent alat peretas (Burp, sqlmap, nikto, dll), honeypot path
+  (wp-login.php, phpmyadmin, .git, dll), path traversal (`../`, `%2e%2e`),
+  pola injection (SQLi/XSS/LFI), endpoint scan (404 ke ≥ `ban_scan_threshold`
+  path acak dalam 60 dtk), brute-force login/owner/register
+  (≥ `ban_fail_threshold` gagal/rate-limit dalam 600 dtk).
+- **Notifikasi Telegram ke owner** saat ada IP diblokir: IP + **lokasi
+  geografis** (ipwho.is, async + cache) + UA + path + waktu.
+- **Kelola ban**: halaman owner `/owner/security` (daftar + unban), bot
+  `/bans /unbanip <ip> /block <ip>`, CLI `admin-denz.py bans|unban|block`.
+- **Hardening server**: socket timeout (anti slowloris), batas koneksi
+  paralel per IP (`conn_max`), rate limit request umum per IP
+  (`req_rate_max`), batas body POST (`max_body`), tolak `Host` berisi CR/LF,
+  allowlist opsional `cors_origins` & `allowed_hosts`, header keamanan
+  tambahan (CSP, `Permissions-Policy`, `Cross-Origin-Opener-Policy`), HSTS +
+  `Secure` cookie otomatis saat lewat tunnel edge TLS, `Server` header
+  disembunyikan.
+- **Default bind 127.0.0.1** (akses hanya via tunnel) + peringatan saat
+  `host` masih `0.0.0.0`; tunnel cloudflared pakai `--no-autoupdate`.
+- IP loopback tidak pernah di-ban otomatis.
+- `SECURITY.md` baru — dokumentasi lapisan keamanan.
+
+## [3.0.1] - 2026-08-11
+
+### Ditambahkan — owner panel
+- **Hapus pengguna (delete)** — tombol `🗑️ Hapus Pengguna (permanen)` di
+  detail member (berlaku untuk member maupun admin/reseller), dengan
+  konfirmasi browser. Menghapus file member + file sesi `.md` + log
+  aktivitas `delete`, lalu notifikasi ke Telegram. Sesuai saran: untuk
+  sengketa pembayaran lebih baik **ban** dulu daripada delete (data tetap
+  tersimpan).
+
 ## [3.0.0] - 2026-08-11
 
 ### Ditambahkan — webdenz v3 (keamanan + UX)

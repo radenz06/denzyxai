@@ -11,6 +11,10 @@ local.properties
 .env.*
 !.env.example
 *.key
+*.pem
+*.crt
+*.pfx
+*.jks
 .denzyx/
 .android/
 .pytest_cache/

@@ -46,6 +46,23 @@ tapi serius kalau disuruh kerja.
   **Keamanan**: CSRF token di semua form, rate limit login/register/chat,
   cookie `HttpOnly; SameSite=Lax` (+ `Secure` saat HTTPS), owner panel
   dengan pencarian & pagination. HTTPS opsional via `ssl_cert`/`ssl_key`.
+  **WAF** (`waf.py`, v3.1.0): IP asli via `CF-Connecting-IP` (hanya
+  dipercaya dari koneksi loopback — cegah spoof), deteksi BurpSuite/sqlmap/
+  nikto/dll, honeypot path (wp-login.php, phpmyadmin, .git, dll), path
+  traversal & injection → **ban IP permanen** (tersimpan `webdata/bans.json`),
+  plus auto-ban endpoint scan & brute-force login. Saat ada yang diblokir,
+  owner dapat **notifikasi Telegram: IP + lokasi geografis + UA + path**.
+  Kelola ban lewat owner panel `/owner/security`, bot `/bans /unbanip /block`,
+  atau `admin-denz.py bans|unban <ip>|block <ip>`. IP yang diblokir dapat
+  halaman 403 berisi marquee *"KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN
+  KALI😹🖕"* — pesan dari denzyx. HTTPS opsional via `ssl_cert`/`ssl_key`
+  (hanya TLS 1.2+ & cipher kuat: RC4/3DES/MD5/CBC diblokir).
+  **Pelacak pengunjung** (`track.py`): setiap yang masuk ke web terekam —
+  IP public & private (peer socket, `CF-Connecting-IP`, rantai
+  `X-Forwarded-For`), lokasi & ISP (ipwho.is async), software
+  (browser/OS/device, bot & scanner terdeteksi), path & waktu. Lihat di
+  owner panel `/owner/visitors`, CLI `admin-denz.py visitors`, data di
+  `webdata/visitors.json`.
 - **Owner panel** (`admin-denz.py`) — kelola member (activate/ban/extend),
   lihat log registrasi, setup config, restart server/bot/tunnel, dan
   ganti password lisensi. Member dengan role **admin (reseller)** bisa
@@ -198,7 +215,9 @@ Semua lewat file atau env var, nggak perlu edit kode:
   terminal). Hapus/rename file buat balik ke default.
 - **`webconfig.json`** (gitignored) — token bot TG, chat id owner,
   username owner, harga langganan, masa aktif, `qr_path`, secret.
-  Contoh kosong ada di `config.example.json`.
+  **Tersimpan terenkripsi di disk** (Fernet; key di `webdata/.config.key`,
+  jangan di-commit) — lihat `securecfg.py`. Config plaintext versi lama
+  otomatis dimigrasi. Contoh kosong ada di `config.example.json`.
 - **Env var auto-daemon** (`DENZYX_AUTO_*`) — interval, balas AI on/off,
   TTS, vibrate, ambang baterai, app yang di-ignore, TTL dedupe. Lihat
   `.env.example`.
@@ -261,6 +280,8 @@ denzyxai/
 ├── auto-denz.py       # daemon 24 jam (notifikasi, auto-reply, baterai)
 ├── voice-denz.py      # panggilan suara (STT + TTS via termux-api)
 ├── lic.py             # gerbang lisensi password (PBKDF2 hash)
+├── securecfg.py       # baca/tulis webconfig.json terenkripsi (Fernet)
+├── track.py           # perekam lengkap pengunjung (IP, lokasi, software)
 ├── system_prompt.md   # persona & aturan AI
 ├── theme.md           # warna TUI
 ├── config.example.json# contoh config web (nilai asli di webconfig.json)

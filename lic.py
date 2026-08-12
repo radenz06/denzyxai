@@ -16,11 +16,14 @@ import base64
 import getpass
 import hashlib
 import hmac
-import json
 import os
 import secrets
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import securecfg  # noqa: E402  (webconfig.json terenkripsi at-rest)
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("WEBDENZ_CONFIG")
@@ -52,11 +55,11 @@ def _obf(s):
 def _lic():
     """Ambil (salt, digest) dari webconfig.json, fallback ke default."""
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = securecfg.read(CONFIG_PATH) or {}
         lic = data.get("lic") or {}
         if lic.get("salt") and lic.get("digest"):
             return _deobf(lic["salt"]), _deobf(lic["digest"])
-    except (OSError, json.JSONDecodeError):
+    except Exception:  # noqa: BLE001
         pass
     return _deobf(_DEFAULT_SALT), _deobf(_DEFAULT_DIGEST)
 
@@ -154,13 +157,14 @@ def setpass():
         return 1
     salt = secrets.token_hex(16)
     digest = hash_pw(p1, salt)
-    try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
+    data = securecfg.read(CONFIG_PATH)
+    if data is None:
+        # config tak terbaca (rusak / key berubah): jangan tulis cuma {lic}
+        # — itu akan menghapus sisa konfigurasi (token TG, secret, dll).
+        print("✖ webconfig.json tidak terbaca (rusak / key berubah). "
+              "Periksa dulu sebelum ganti lisensi.", file=sys.stderr)
+        return 1
     data["lic"] = {"salt": _obf(salt), "digest": _obf(digest)}
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                           encoding="utf-8")
+    securecfg.write(data, CONFIG_PATH)
     print("✅ Password lisensi diganti.")
     return 0

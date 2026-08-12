@@ -9,14 +9,20 @@ Fitur:
   perpanjang masa aktif, lihat log, decrypt password member.
 - Konfigurasi & notifikasi via Telegram (denzbot.py), owner punya
   username/password terenkripsi (salted hash).
+- Keamanan ekstra via waf.py: IP asli (CF-Connecting-IP dari loopback saja),
+  deteksi serangan (scanner/honeypot/traversal/injection), ban IP permanen +
+  notifikasi Telegram, lihat & kelola ban di /owner/security.
 
 Data & rahasia disimpan di webconfig.json (gitignored) dan webdata/
-(gitignored). JANGAN commit webconfig.json ke repo publik.
+(gitignored). Sejak v0.4.0 webconfig.json disimpan TERENKRIPSI di disk
+(Fernet, key di webdata/.config.key) — lihat securecfg.py.
+JANGAN commit webconfig.json maupun webdata/.config.key ke repo publik.
 """
 
 import base64
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import os
@@ -33,6 +39,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import securecfg  # noqa: E402  (config terenkripsi at-rest)
+import track  # noqa: E402  (perekam lengkap pengunjung)
+import waf  # noqa: E402  (Web Application Firewall)
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("WEBDENZ_CONFIG") or BASE_DIR / "webconfig.json")
@@ -70,7 +80,7 @@ _DEFAULTS = {
     "sub_days": SUB_DAYS_DEFAULT,
     "qr_url": "",
     "qr_path": "",
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 8000,
     # https (isikan path cert/key; bila kosong, server tetap HTTP)
     "ssl_cert": "",
@@ -80,6 +90,22 @@ _DEFAULTS = {
     "rate_window_sec": 600,
     "chat_rate_max": 30,
     "chat_rate_window": 60,
+    # keamanan WAF (lihat waf.py)
+    "waf": True,
+    "ban_scan_threshold": 25,     # 404 ke path acak dalam 60s → ban
+    "ban_fail_threshold": 6,      # gagal login/rate-limit dalam 600s → ban
+    "max_body": 262144,           # batas ukuran body POST (256 KB)
+    "req_rate_max": 600,          # max request / menit / IP (429 bila lebih)
+    "req_rate_window": 60,
+    "conn_max": 8,                # max koneksi paralel / IP (429 bila lebih)
+    "cors_origins": [],           # allowlist origin CORS (kosong = *) — isi
+                                  # domain frontend vercel + tunnel bila perlu
+    "allowed_hosts": [],          # allowlist Host (kosong = tidak diperketat;
+                                  # tetap tolak Host berisi CR/LF)
+    "tg_notify_security": True,   # kirim notifikasi TG saat ada IP di-ban
+    # perekam pengunjung (lihat track.py) — webdata/visitors.json
+    "track_visitors": True,       # catat IP/lokasi/software tiap pengunjung
+    "track_geo": True,            # geolokasi (lokasi + ISP) via ipwho.is
     # pagination owner panel
     "owner_per_page": 50,
     # model tersamar supaya tidak terbaca orang di GitHub
@@ -90,25 +116,26 @@ _DEFAULTS = {
 
 def load_config():
     cfg = json.loads(json.dumps(_DEFAULTS))
-    try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = securecfg.read(CONFIG_PATH, DATA_DIR)
+    if data:
         for k, v in data.items():
             if isinstance(v, dict) and isinstance(cfg.get(k), dict):
                 cfg[k].update(v)
             else:
                 cfg[k] = v
-    except (OSError, json.JSONDecodeError):
-        pass
-    if not cfg.get("secret"):
+    # secret baru + save HANYA kalau aman: config berhasil dibaca (termasuk
+    # legacy plaintext yang di-migrasi) ATAU file belum ada (first-run).
+    # Kalau read() gagal (None) tapi file ADA, jangan simpan — menimpa
+    # config akan menghapus nilai asli (token TG, password owner, secret).
+    if not cfg.get("secret") and (data is not None or not CONFIG_PATH.exists()):
         cfg["secret"] = secrets.token_hex(32)
         save_config(cfg)
     return cfg
 
 
 def save_config(cfg):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
-                           encoding="utf-8")
+    # disimpan terenkripsi di disk (lihat securecfg.py)
+    securecfg.write(cfg, CONFIG_PATH, DATA_DIR)
 
 
 def _fernet():
@@ -424,13 +451,14 @@ def member_chat(username, prompt):
 # HTTP server
 # ---------------------------------------------------------------------------
 
-_VER = "v3.0.0"
+_VER = "v3.1.0"
 
 
-def _cookie(name, value, max_age=None):
+def _cookie(name, value, max_age=None, secure=None):
     """Cookie aman: HttpOnly + SameSite=Lax, Secure bila server HTTPS."""
+    secure = _HTTPS if secure is None else secure
     parts = f"{name}={value}; Path=/; HttpOnly; SameSite=Lax"
-    if _HTTPS:
+    if secure:
         parts += "; Secure"
     if max_age is not None:
         parts += f"; Max-Age={int(max_age)}"
@@ -457,6 +485,48 @@ class _RateLimiter:
 
 
 _RL = _RateLimiter()
+
+
+class _ReqError(Exception):
+    """Error request yang bisa direspon langsung (diterima di do_*)."""
+
+    def __init__(self, code, body=b"", ctype="text/html; charset=utf-8",
+                 headers=None):
+        super().__init__(body)
+        self.code = code
+        self.body = body
+        self.ctype = ctype
+        self.headers = headers or {}
+
+
+class _ConnLimit:
+    """Batas koneksi paralel per IP (cegah connection flood)."""
+
+    def __init__(self, max_per_ip=8):
+        self._lock = threading.Lock()
+        self._cur = {}
+        self._max = max_per_ip
+
+    def enter(self, ip):
+        with self._lock:
+            n = self._cur.get(ip, 0)
+            if n >= self._max:
+                return False
+            self._cur[ip] = n + 1
+            return True
+
+    def exit(self, ip):
+        with self._lock:
+            n = self._cur.get(ip)
+            if n is None:
+                return
+            if n <= 1:
+                self._cur.pop(ip, None)
+            else:
+                self._cur[ip] = n - 1
+
+
+_CONN = _ConnLimit()
 
 _CSS = """
 :root{--bg:#0a0e1a;--card:rgba(21,27,44,.75);--card2:#1a2138;--line:#283149;
@@ -638,6 +708,27 @@ def page(title, body, subtitle="member area"):
     bot_link = f"https://t.me/{bot}" if bot else "/register"
     return _PAGE.format(title=title, css=_CSS, body=body, subtitle=subtitle,
                         js=_JS, bot=bot_link, ver=_VER)
+
+
+def _blocked_page(reason=""):
+    """Halaman 403 untuk IP yang diblokir — marquee pesan dari denzyx."""
+    msg = "KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN KALI😹🖕"
+    body = f"""<div style="text-align:center;padding:10vh 16px">
+  <div style="font-size:56px">🚫</div>
+  <marquee behavior="scroll" direction="left" scrollamount="10"
+           style="max-width:860px;margin:24px auto 0;font-size:26px;
+                  font-weight:800;letter-spacing:1px;color:#fff;
+                  background:linear-gradient(90deg,#ef4444,#f59e0b);
+                  border-radius:14px;padding:18px;
+                  box-shadow:0 8px 30px rgba(239,68,68,.35)">
+    {html.escape(msg)}
+  </marquee>
+  <h1 style="margin-top:36px;font-size:30px;color:#f87171">403 — Akses Diblokir</h1>
+  <p style="margin:12px 0 0;color:var(--mut)">{html.escape(reason)}</p>
+  <p style="color:var(--mut)">IP kamu sudah masuk daftar hitam keamanan web ini.</p>
+  <p style="margin-top:32px;font-size:14px;color:#64748b">pesan dari denzyx 😎</p>
+</div>"""
+    return page("403", body, subtitle="diblokir")
 
 
 def _qr_source(cfg):
@@ -922,8 +1013,10 @@ def _owner_page(cfg, msg="", err="", q="", pg=1):
                f'<a href="/owner?pg={prev}{psep}">← Prev</a> · '
                f'<a href="/owner?pg={nxt}{psep}">Next →</a></small></p>')
     return page("Owner Panel", f"""<div class="toolbar">
-<a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
-<a href="/owner/register">+ Daftarkan Member</a></div>
+ <a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
+ <a href="/owner/security">Keamanan</a>
+ <a href="/owner/visitors">Pengunjung</a>
+ <a href="/owner/register">+ Daftarkan Member</a></div>
 {_flash(msg, err)}
 <div class="card"><h3>Owner Panel</h3>
 <p>Member: {total} · Admin: {admins} · Server: {html_esc(cfg.get('host'))}:{cfg.get('port')}
@@ -947,6 +1040,230 @@ def _admin_add_page(cfg, msg="", err=""):
 <a href="/chat">Chat</a><a href="/status">Status Langganan</a>
 <a href="/admin/add">+ Tambah Member</a></div>
 {body}""", subtitle="admin")
+
+
+def _owner_security_page(msg="", err=""):
+    """Halaman WAF: daftar IP yang diblokir + tombol unban."""
+    bans = waf.list_bans()
+    rows = []
+    for ip, e in sorted(bans.items(),
+                        key=lambda kv: kv[1].get("first_seen_ts") or 0,
+                        reverse=True):
+        csrf = '<input type="hidden" name="_csrf" value="__CSRF__">'
+        rows.append(
+            f"<tr><td><code>{html_esc(ip)}</code></td>"
+            f"<td>{html_esc(e.get('reason') or '-')}</td>"
+            f"<td>{int(e.get('count') or 1)}x</td>"
+            f"<td>{html_esc(e.get('first_seen') or '-')}</td>"
+            f"<td>{html_esc(e.get('last_seen') or '-')}</td>"
+            f"<td>{html_esc(e.get('geo') or '-')}</td>"
+            f"<td><form method='post' style='display:inline'>{csrf}"
+            f"<input type='hidden' name='ip' value='{html_esc(ip)}'>"
+            f"<button name='action' value='unban' "
+            f"style='width:auto;display:inline-block;padding:8px 14px'>"
+            f"Unban</button></form></td></tr>")
+    table = ("<table><tr><th>IP</th><th>alasan</th><th>jumlah</th>"
+             "<th>pertama kali</th><th>terakhir</th><th>lokasi</th><th></th></tr>"
+             + "".join(rows) + "</table>") if rows else \
+        "<p>✅ Tidak ada IP yang diblokir.</p>"
+    return page("Keamanan Web", f"""<div class="toolbar">
+<a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
+<a href="/owner/security">Keamanan</a>
+<a href="/owner/visitors">Pengunjung</a>
+<a href="/owner/register">+ Daftarkan Member</a></div>
+{_flash(msg, err)}
+<div class="card"><h3>🛡️ IP yang Diblokir WAF</h3>
+<p><small>IP di-ban otomatis saat ada serangan (scanner, brute-force, dll) —
+di-banner permanen. Unban dari sini atau via bot: /unbanip &lt;ip&gt;.</small></p>
+{table}</div>""", subtitle="owner")
+
+
+def _visitor_badges(v, bans):
+    """Badge IP class / bot / banned untuk baris pengunjung."""
+    cls = v.get("ip_class") or "invalid"
+    colors = {"public": "#22c55e", "private": "#f59e0b",
+              "loopback": "#8b5cf6", "invalid": "#ef4444"}
+    lbl = {"public": "PUBLIC", "private": "PRIVATE",
+           "loopback": "LOOPBACK", "invalid": "?"}[cls]
+    out = [f'<span class="badge" style="background:{colors[cls]}">{lbl}</span>']
+    if v.get("is_bot"):
+        out.append('<span class="badge" style="background:#7c3aed">BOT</span>')
+    if v.get("ip") in bans:
+        out.append('<span class="badge" style="background:#ef4444">BANNED</span>')
+    return " ".join(out)
+
+
+def _owner_visitors_page(msg="", err="", q="", pg=1, sort="last"):
+    """Halaman owner: semua pengunjung (IP, lokasi, software, dll)."""
+    q = (q or "").strip().lower()
+    track.flush()
+    bans = waf.list_bans()
+    data = track.load()
+    items = list(data.values())
+    if q:
+        items = [v for v in items
+                 if q in v.get("ip", "").lower()
+                 or q in (v.get("browser") or "").lower()
+                 or q in (v.get("os") or "").lower()
+                 or q in (v.get("geo") or "").lower()
+                 or q in (v.get("device") or "").lower()]
+    if sort == "visits":
+        items.sort(key=lambda v: int(v.get("visits") or 0), reverse=True)
+    elif sort == "new":
+        items.sort(key=lambda v: v.get("first_seen") or "", reverse=True)
+    else:
+        items.sort(key=lambda v: v.get("last_seen") or "", reverse=True)
+    s = track.summary()
+    total = len(items)
+    per = int(load_config().get("owner_per_page") or 50)
+    pages = max(1, -(-total // per))
+    pg = max(1, min(int(pg or 1), pages))
+    rows = []
+    start = (pg - 1) * per
+    for v in items[start:start + per]:
+        ip = html_esc(v.get("ip", ""))
+        sw = f"{html_esc(v.get('browser') or '-')} · {html_esc(v.get('os') or '-')}"
+        loc = html_esc(v.get("geo") or "-")
+        isp = html_esc(v.get("isp") or "")
+        if isp and v.get("geo"):
+            loc += f" <small>({isp})</small>"
+        paths = " ".join(f"<code>{html_esc(p)}</code>" for p in (v.get("paths") or [])[:4])
+        csrf = '<input type="hidden" name="_csrf" value="__CSRF__">'
+        rows.append(
+            f"<tr><td>{_visitor_badges(v, bans)} <code>{ip}</code><br>"
+            f"<small>{html_esc(v.get('cf_ip') or '-')} · "
+            f"{html_esc(v.get('peer') or '-')}</small></td>"
+            f"<td>{loc}</td><td>{sw}<br><small>{html_esc(v.get('device') or '-')}"
+            f"{' · ' + html_esc(v.get('engine') or '-') if v.get('engine') and v.get('engine') != '-' else ''}</small></td>"
+            f"<td>{int(v.get('visits') or 0)}x</td>"
+            f"<td><small>{html_esc(v.get('first_seen') or '-')}<br>"
+            f"{html_esc(v.get('last_seen') or '-')}</small></td>"
+            f"<td><small>{paths}</small></td>"
+            f"<td><a href='/owner/visitor/{urllib.parse.quote(v.get('ip',''))}'>detail</a>"
+            f" <form method='post' style='display:inline'>{csrf}"
+            f"<input type='hidden' name='ip' value='{html_esc(v.get('ip',''))}'>"
+            f"<button name='action' value='ban' style='width:auto;display:inline-block;padding:6px 10px;margin:0'>⛔ Ban</button>"
+            f"</form></td></tr>")
+    table = ("<table><tr><th>IP / peer</th><th>lokasi & ISP</th>"
+             "<th>software</th><th>kunjungan</th><th>pertama / terakhir</th>"
+             "<th>path</th><th></th></tr>" + "".join(rows) + "</table>") if rows \
+        else "<p>Belum ada pengunjung tercatat.</p>"
+    qsafe = html_esc(q)
+    search = (f'<form method="get" action="/owner/visitors" class="toolbar-search">'
+              f'<input name="q" value="{qsafe}" placeholder="cari IP/browser/OS/lokasi..." '
+              f'style="width:280px;display:inline-block;margin:0">'
+              f'<button type="submit" style="width:auto;display:inline-block;padding:10px 16px;margin:0">Cari</button></form>')
+    psep = f"&amp;q={urllib.parse.quote(q)}" if q else ""
+    nav = ""
+    if pages > 1:
+        prev, nxt = max(1, pg - 1), min(pages, pg + 1)
+        nav = (f'<p><small>Hal {pg}/{pages} — '
+               f'<a href="/owner/visitors?pg={prev}{psep}">← Prev</a> · '
+               f'<a href="/owner/visitors?pg={nxt}{psep}">Next →</a></small></p>')
+    cards = (f'<div class="toolbar" style="gap:8px;flex-wrap:wrap">'
+             f'<span class="badge" style="background:#22c55e">Total {s["total"]}</span>'
+             f'<span class="badge" style="background:#4f7cff">Hari ini {s["today"]}</span>'
+             f'<span class="badge" style="background:#8b5cf6">Aktif 24 jam {s["active_24h"]}</span>'
+             f'<span class="badge" style="background:#64748b">Kunjungan {s["visits"]}</span>'
+             f'<span class="badge" style="background:#ef4444">Bot {s["bots"]}</span>'
+             f'<span class="badge" style="background:#f59e0b">Mobile {s["mobile"]}</span>'
+             f'</div>')
+    csrf = '<input type="hidden" name="_csrf" value="__CSRF__">'
+    return page("Pengunjung", f"""<div class="toolbar">
+<a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
+<a href="/owner/security">Keamanan</a>
+<a href="/owner/visitors">Pengunjung</a>
+<a href="/owner/register">+ Daftarkan Member</a></div>
+{_flash(msg, err)}
+<div class="card"><h3>👁️ Pengunjung Web</h3>
+<p><small>Semua yang masuk ke web: IP public/private, lokasi & ISP,
+software (browser/OS/device), path, waktu. Data di
+<code>webdata/visitors.json</code>.</small></p>
+{cards}
+{search}</div>
+<div class="card">{table}{nav}
+<form method="post" style="margin-top:12px">{csrf}
+<button name="action" value="clear" class="err"
+style="width:auto;display:inline-block;padding:8px 14px">🗑️ Hapus semua data pengunjung</button>
+</form></div>""", subtitle="owner")
+
+
+def _owner_visitor_page(ip, msg="", err=""):
+    track.flush()
+    v = track.get(ip)
+    if not v:
+        return page("Visitor", f"""<div class="toolbar">
+<a href="/owner">Dashboard</a><a href="/owner/visitors">← Pengunjung</a></div>
+{_flash(msg, err)}
+<div class="card"><h3>👁️ Visitor {html_esc(ip)}</h3>
+<p>Data tidak ditemukan.</p></div>""", subtitle="owner")
+    bans = waf.list_bans()
+    rows = [
+        ("IP", v.get("ip", "")),
+        ("Klasifikasi", v.get("ip_class", "")),
+        ("Peer (socket)", v.get("peer", "")),
+        ("CF-Connecting-IP", v.get("cf_ip", "")),
+        ("X-Forwarded-For", v.get("xff", "")),
+        ("Lokasi", v.get("geo", "-")),
+        ("ISP", v.get("isp", "-")),
+        ("Organisasi", v.get("org", "-")),
+        ("Tipe koneksi", v.get("conn_type", "-")),
+        ("User-Agent", v.get("ua", "-")),
+        ("Browser", v.get("browser", "-")),
+        ("OS", v.get("os", "-")),
+        ("Device", v.get("device", "-")),
+        ("Engine", v.get("engine", "-")),
+        ("Bot?", "Ya" if v.get("is_bot") else "Tidak"),
+        ("Pertama kali", v.get("first_seen", "-")),
+        ("Terakhir", v.get("last_seen", "-")),
+        ("Total kunjungan", str(v.get("visits", 0))),
+    ]
+    if v.get("ip") in bans:
+        rows.append(("Status WAF", "⛔ BANNED — " + (bans[v["ip"]].get("reason") or "")))
+    tbl = "<table>" + "".join(
+        f"<tr><td style='width:200px'><small>{html_esc(k)}</small></td>"
+        f"<td>{html_esc(str(val))}</td></tr>" for k, val in rows) + "</table>"
+    methods = " · ".join(f"<code>{html_esc(m)}</code> {c}x"
+                         for m, c in (v.get("methods") or {}).items()) or "-"
+    statuses = " · ".join(f"<code>{html_esc(s)}</code> {c}x"
+                          for s, c in (v.get("statuses") or {}).items()) or "-"
+    paths = "".join(f"<li><code>{html_esc(p)}</code></li>"
+                    for p in (v.get("paths") or [])) or "<li>-</li>"
+    refs = "".join(f"<li><small>{html_esc(r)}</small></li>"
+                   for r in (v.get("referers") or [])) or "<li>-</li>"
+    log_rows = ""
+    for j in track.recent(ip, 20):
+        log_rows += (f"<tr><td><small>{html_esc(j.get('ts') or '')}</small></td>"
+                     f"<td><code>{html_esc(j.get('method') or '')}</code> "
+                     f"{html_esc(j.get('path') or '')}</td>"
+                     f"<td><small>{html_esc(j.get('ref') or '-')}</small></td></tr>")
+    log_tbl = ("<table><tr><th>waktu</th><th>request</th><th>referer</th></tr>"
+               + log_rows + "</table>") if log_rows else "<p>-</p>"
+    csrf = '<input type="hidden" name="_csrf" value="__CSRF__">'
+    ban_form = ""
+    if v.get("ip") in bans:
+        ban_form = f"""<form method="post" style="display:inline">{csrf}
+<input type="hidden" name="ip" value="{html_esc(v.get('ip',''))}">
+<button class="ok" name="action" value="unban"
+style="width:auto;display:inline-block;padding:8px 14px">Unban</button></form>"""
+    else:
+        ban_form = f"""<form method="post" style="display:inline">{csrf}
+<input type="hidden" name="ip" value="{html_esc(v.get('ip',''))}">
+<button class="err" name="action" value="ban"
+style="width:auto;display:inline-block;padding:8px 14px">⛔ Ban IP ini</button></form>"""
+    return page("Visitor", f"""<div class="toolbar">
+<a href="/owner">Dashboard</a><a href="/owner/logs">Log</a>
+<a href="/owner/security">Keamanan</a>
+<a href="/owner/visitors">← Pengunjung</a></div>
+{_flash(msg, err)}
+<div class="card"><h3>👁️ Detail Visitor</h3>{tbl}</div>
+<div class="card"><h3>🛡️ Aksi</h3>{ban_form}</div>
+<div class="card"><h3>Metode & Status</h3>
+<p><small>Metode:</small> {methods}</p>
+<p><small>Status:</small> {statuses}</p></div>
+<div class="card"><h3>Path yang dikunjungi</h3><ul>{paths}</ul></div>
+<div class="card"><h3>Referer</h3><ul>{refs}</ul></div>
+<div class="card"><h3>Riwayat terakhir</h3>{log_tbl}</div>""", subtitle="owner")
 
 
 def _owner_member_page(m):
@@ -973,6 +1290,10 @@ def _owner_member_page(m):
     else:
         act += (f'<form method="post" style="display:inline">{csrf}'
                 '<button class="ok" name="action" value="makeadmin">Jadikan Admin</button></form>')
+    uname = html_esc(m["username"])
+    del_form = (f'<form method="post" onsubmit="return confirm('
+                f'\'Hapus {uname} PERMANEN? Data chat &amp; password ikut terhapus.\');">{csrf}'
+                '<button class="danger" name="action" value="delete">🗑️ Hapus Pengguna (permanen)</button></form>')
     reset_pw = f"""<form method="post">{csrf}
 <input name="new_password" type="password" placeholder="password baru (min. 4)" autocomplete="off">
 <button name="action" value="resetpass">Reset Password</button></form>"""
@@ -987,6 +1308,8 @@ def _owner_member_page(m):
 <p>Login: {m.get('login_count', 0)}x · terakhir {html_esc(m.get('last_login') or '-')}</p>
 <p>Catatan: {html_esc(m.get('note') or '-')}</p>
 {act}</div>
+<div class="card"><h4>Zona berbahaya</h4>{del_form}
+<p><small>Menghapus pengguna akan menghilangkan akun, chat history, dan sesi login-nya secara permanen. Tidak bisa dibatalkan.</small></p></div>
 <div class="card"><h4>Reset password</h4>{reset_pw}</div>
 <div class="card"><h4>Sesi aktif</h4><pre>{html_esc(json.dumps(m.get('sessions') or [], indent=2, ensure_ascii=False))}</pre></div>
 <div class="card"><h4>Riwayat chat</h4>
@@ -1109,24 +1432,71 @@ def _md_html(text):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    server_version = "denzyx"      # jangan bocorkan BaseHTTP/Python version
+    sys_version = ""
+
+    def setup(self):
+        super().setup()
+        # matikan slowloris / koneksi menggantung (read/write timeout)
+        try:
+            self.connection.settimeout(20)
+        except OSError:
+            pass
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            ip = getattr(self, "_real_ip", None)
+            if ip:
+                _CONN.exit(ip)
 
     # --- helpers ---
     def _cors(self, headers):
         out = dict(headers or {})
-        out.setdefault("Access-Control-Allow-Origin", "*")
+        cfg = load_config()
+        origins = [str(x).strip() for x in (cfg.get("cors_origins") or [])
+                   if str(x).strip()]
+        origin = self.headers.get("Origin") or ""
+        if origins:
+            # allowlist ketat: hanya origin terdaftar yang boleh akses lintas-origin
+            if origin in origins:
+                out["Access-Control-Allow-Origin"] = origin
+            else:
+                out["Access-Control-Allow-Origin"] = ""
+        else:
+            # tanpa allowlist, tetap layani CORS (frontend vercel default)
+            out.setdefault("Access-Control-Allow-Origin", "*")
         out.setdefault("Access-Control-Allow-Methods",
                        "GET, POST, OPTIONS")
         out.setdefault("Access-Control-Allow-Headers", "Content-Type")
+        out.setdefault("Access-Control-Max-Age", "600")
         return out
 
     def _send(self, code, body=b"", ctype="text/html; charset=utf-8",
               headers=None):
+        ip = getattr(self, "_real_ip", None)
+        if ip:
+            track.status(ip, code)
         headers = self._cors(headers)
         headers.setdefault("X-Content-Type-Options", "nosniff")
         headers.setdefault("X-Frame-Options", "DENY")
         headers.setdefault("Referrer-Policy", "no-referrer")
+        headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         if ctype.startswith("text/html"):
             headers.setdefault("Cache-Control", "no-store")
+            headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data: https:; "
+                "style-src 'self' 'unsafe-inline'; script-src 'self' "
+                "'unsafe-inline'; connect-src 'self' https:; "
+                "frame-ancestors 'none'")
+            headers.setdefault("Permissions-Policy",
+                               "camera=(), microphone=(), geolocation=(), "
+                               "payment=()")
+        if getattr(self, "_secure", False):
+            headers.setdefault("Strict-Transport-Security",
+                               "max-age=31536000; includeSubDomains")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1151,7 +1521,16 @@ class Handler(BaseHTTPRequestHandler):
         return {k: m.value for k, m in c.items()}
 
     def _form(self):
-        ln = int(self.headers.get("Content-Length") or 0)
+        raw = self.headers.get("Content-Length") or "0"
+        try:
+            ln = int(raw)
+        except ValueError:
+            raise _ReqError(400, b"Content-Length tidak valid")
+        if ln < 0:
+            raise _ReqError(400, b"Content-Length tidak valid")
+        max_body = int(load_config().get("max_body") or 262144)
+        if ln > max_body:
+            raise _ReqError(413, b"body terlalu besar")
         body = self.rfile.read(ln) if ln else b""
         ctype = self.headers.get("Content-Type", "")
         if "json" in ctype:
@@ -1167,7 +1546,89 @@ class Handler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in q.items()}
 
     def _ip(self):
-        return str(self.client_address[0])
+        return getattr(self, "_real_ip", str(self.client_address[0]))
+
+    # --- waf / keamanan ---
+    def _prelude(self):
+        """Set state per-request: IP asli, path, guard WAF dasar.
+
+        Return True bila request sudah ditangani (jangan lanjut routing).
+        """
+        global _HTTPS
+        self._path = urllib.parse.urlparse(self.path).path
+        self._real_ip = waf.get_real_ip(self.client_address, self.headers)
+        cfg = load_config()
+        # perekam pengunjung: IP (public/private), lokasi, software, dll.
+        if cfg.get("track_visitors", True):
+            track.set_geo(cfg.get("track_geo", True))
+            track.visit(self._real_ip, self.headers, self._path,
+                        method=self.command, peer=self.client_address)
+        # edge TLS (SSL langsung / lewat cloudflared) → Secure cookie + HSTS
+        import ssl
+        self._secure = bool(
+            isinstance(getattr(self, "connection", None), ssl.SSLSocket)
+            or self.headers.get("CF-Connecting-IP")
+            or (self.headers.get("X-Forwarded-Proto") or "").lower() == "https")
+        if self._secure:
+            _HTTPS = True
+        if not _CONN.enter(self._real_ip):
+            self._json(429, {"error": "terlalu banyak koneksi, coba lagi"})
+            return True
+        # host header smuggling / Host asing (allowlist opsional)
+        host = self.headers.get("Host") or ""
+        if "\r" in host or "\n" in host:
+            self._waf_deny("Host header tidak valid")
+            return True
+        allowed = [str(x).strip().lower() for x in (cfg.get("allowed_hosts") or [])
+                   if str(x).strip()]
+        if allowed:
+            hostname = host.split(":", 1)[0].strip().lower()
+            if hostname not in allowed and hostname not in (
+                    "localhost", "127.0.0.1", "::1"):
+                self._waf_deny("Host tidak diizinkan")
+                return True
+        # rate limit request umum per IP (bot / crawl)
+        if not self._rate_limit(f"req:{self._real_ip}",
+                                cfg.get("req_rate_max", 600),
+                                cfg.get("req_rate_window", 60)):
+            self._json(429, {"error": "terlalu banyak request, coba lagi"})
+            return True
+        return False
+
+    def _waf_guard(self):
+        """Cek IP banned + sinyal serangan. Return True bila sudah direspon."""
+        ip = self._ip()
+        if waf.is_banned(ip):
+            self._waf_deny("IP ini diblokir WAF")
+            return True
+        if not load_config().get("waf", True):
+            return False
+        sig = waf.scan_signal(ip, self.headers.get("User-Agent", ""),
+                              self._path,
+                              urllib.parse.urlparse(self.path).query)
+        if sig:
+            waf.ban(ip, sig, ua=self.headers.get("User-Agent", ""),
+                    path=self._path)
+            self._waf_deny(sig)
+            return True
+        return False
+
+    def _waf_deny(self, reason):
+        if self._wants_json():
+            self._json(403, {"ok": False, "error": "akses diblokir"})
+        else:
+            self._send(403, _blocked_page(reason).encode())
+
+    def _record_404(self):
+        """Catat 404 path tidak dikenal; ban bila endpoint scan. Return handled."""
+        if waf.record_404(self._ip(), self._path):
+            self._waf_deny("endpoint scan")
+            return True
+        return False
+
+    def _flag(self, kind, reason):
+        """Pencatat mencurigakan; ban otomatis bila lewat threshold."""
+        waf.flag(self._ip(), kind, reason)
 
     # --- csrf (per-sesi, HMAC di cookie HttpOnly) ---
     def _ensure_csrf(self):
@@ -1194,7 +1655,8 @@ class Handler(BaseHTTPRequestHandler):
     def _html(self, body_bytes):
         """Kirim halaman HTML + pastikan cookie CSRF + injeksi token."""
         tok = self._csrf_tok()
-        hdr = {"Set-Cookie": _cookie("denz_csrf", self._ensure_csrf())}
+        hdr = {"Set-Cookie": _cookie("denz_csrf", self._ensure_csrf(),
+                                     secure=getattr(self, "_secure", False))}
         self._send(200, body_bytes.replace(b"__CSRF__", tok.encode()),
                    headers=hdr)
 
@@ -1230,11 +1692,27 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- routes ---
     def do_OPTIONS(self):
+        if self._prelude():
+            return
+        if self._waf_guard():
+            return
         self._send(204, b"")
 
     def do_GET(self):
+        try:
+            if self._prelude():
+                return
+            if self._waf_guard():
+                return
+            self._do_get()
+        except _ReqError as e:
+            self._send(e.code, e.body, e.ctype, e.headers)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _do_get(self):
         cfg = load_config()
-        path = urllib.parse.urlparse(self.path).path
+        path = self._path
         m, _ = self._auth_member()
         if path == "/":
             self._redirect("/chat" if m else "/login")
@@ -1274,11 +1752,28 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._owner_get(path, cfg)
         else:
+            if self._record_404():
+                return
             self._html(page("404", "<p>404</p>").encode())
 
     def do_POST(self):
+        try:
+            if self._prelude():
+                return
+            if self._waf_guard():
+                return
+            self._do_post()
+        except _ReqError as e:
+            if e.ctype.startswith("application/json"):
+                self._json(e.code, {"ok": False, "error": "permintaan ditolak"})
+            else:
+                self._send(e.code, e.body, e.ctype, e.headers)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _do_post(self):
         cfg = load_config()
-        path = urllib.parse.urlparse(self.path).path
+        path = self._path
         data = self._form()
         if path == "/api/register":
             self._api_register(data)
@@ -1290,7 +1785,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_chat_stream(data)
         elif path == "/logout":
             if self._csrf_ok(data):
-                hdr = {"Set-Cookie": _cookie("denz_member", "", max_age=0)}
+                hdr = {"Set-Cookie": _cookie("denz_member", "", max_age=0,
+                                             secure=getattr(self, "_secure", False))}
                 self._redirect("/login", hdr)
             else:
                 self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
@@ -1329,6 +1825,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._owner_post(path, data)
         else:
+            if self._record_404():
+                return
             self._html(page("404", "<p>404</p>").encode())
 
     # --- api json (untuk frontend vercel) ---
@@ -1336,6 +1834,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         if not self._rate_limit(f"reg:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
+            self._flag("register", "spam registrasi (rate-limit)")
             self._json(429, {"ok": False, "error": "terlalu banyak percobaan, coba lagi nanti"})
             return
         username = str(data.get("username") or "").strip()
@@ -1360,6 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         if not self._rate_limit(f"login:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
+            self._flag("login", "brute-force login (rate-limit)")
             self._json(429, {"ok": False, "error": "terlalu banyak percobaan, coba lagi nanti"})
             return
         username = str(data.get("username") or "").strip()
@@ -1373,6 +1873,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok = False
         log_login(username, ok, self._ip())
         if not ok:
+            self._flag("login", "brute-force login (kredensial salah)")
             self._json(401, {"ok": False, "error": "username/password salah"})
             return
         st = member_status(m)
@@ -1387,7 +1888,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "status": st, "error": "langganan kedaluwarsa — hubungi owner",
                              "pay_link": _pay_tg_link(cfg, m)})
             return
-        tok = issue_member_session(username, self.client_address[0])
+        tok = issue_member_session(username, self._ip())
         from denzbot import tg_notify
         tg_notify(f"🔓 Login member: {username} ({self.client_address[0]})")
         self._json(200, {"ok": True, "token": tok, "username": username,
@@ -1426,6 +1927,7 @@ class Handler(BaseHTTPRequestHandler):
     def _post_login(self, cfg, data):
         if not self._rate_limit(f"login:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
+            self._flag("login", "brute-force login (rate-limit)")
             self._html(_login_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
             return
         username = str(data.get("username") or "").strip()
@@ -1440,6 +1942,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok = False
         log_login(username, ok, self._ip())
         if not ok:
+            self._flag("login", "brute-force login (kredensial salah)")
             self._html(_login_page(cfg, err="username/password salah").encode())
             return
         st = member_status(m)
@@ -1455,11 +1958,13 @@ class Handler(BaseHTTPRequestHandler):
         tok = issue_member_session(username, self._ip())
         from denzbot import tg_notify
         tg_notify(f"🔓 Login member: {username} ({self._ip()})")
-        self._redirect("/chat", {"Set-Cookie": _cookie("denz_member", tok)})
+        self._redirect("/chat", {"Set-Cookie": _cookie(
+            "denz_member", tok, secure=getattr(self, "_secure", False))})
 
     def _post_register(self, cfg, data):
         if not self._rate_limit(f"reg:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
+            self._flag("register", "spam registrasi (rate-limit)")
             self._html(_register_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
             return
         username = str(data.get("username") or "").strip()
@@ -1621,6 +2126,7 @@ class Handler(BaseHTTPRequestHandler):
     def _post_owner_login(self, cfg, data):
         if not self._rate_limit(f"owner:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
+            self._flag("owner", "brute-force owner login (rate-limit)")
             self._html(_owner_login_page(cfg, err="terlalu banyak percobaan, coba lagi nanti").encode())
             return
         user = str(data.get("username") or "")
@@ -1630,10 +2136,12 @@ class Handler(BaseHTTPRequestHandler):
               and verify_password(pw, own.get("salt", ""), own.get("password_hash", "")))
         log_activity("owner_login", f"{user} -> {'ok' if ok else 'gagal'}")
         if not ok:
+            self._flag("owner", "brute-force owner login (kredensial salah)")
             self._html(_owner_login_page(cfg, err="kredensial salah").encode())
             return
         tok = issue_owner_token()
-        self._redirect("/owner", {"Set-Cookie": _cookie("denz_owner", tok)})
+        self._redirect("/owner", {"Set-Cookie": _cookie(
+            "denz_owner", tok, secure=getattr(self, "_secure", False))})
 
     # --- owner ---
     def _owner_get(self, path, cfg):
@@ -1644,6 +2152,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/owner/logs":
             self._html(_owner_logs_page(q=q.get("q", ""),
                                         pg=int(q.get("pg") or 1)).encode())
+        elif path == "/owner/security":
+            self._html(_owner_security_page().encode())
+        elif path == "/owner/visitors":
+            self._html(_owner_visitors_page(
+                q=q.get("q", ""), pg=int(q.get("pg") or 1),
+                sort=q.get("sort", "last")).encode())
+        elif path.startswith("/owner/visitor/"):
+            self._html(_owner_visitor_page(
+                urllib.parse.unquote(path[len("/owner/visitor/"):])).encode())
         elif path == "/owner/register":
             self._html(_register_page(cfg, msg="Daftarkan member baru dari sini (owner).").encode())
         elif path.startswith("/owner/member/"):
@@ -1706,11 +2223,56 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._redirect(f"/owner/member/{username}")
                     return
+            elif action == "delete":
+                delete_member(username)
+                try:
+                    session_md_path(username).unlink()
+                except OSError:
+                    pass
+                log_activity("delete", username)
+                from denzbot import tg_notify
+                tg_notify(f"🗑️ Owner hapus pengguna: {username}")
+                self._redirect("/owner")
+                return
             save_member(m)
             write_session_md(m)
             from denzbot import tg_notify
             tg_notify(f"🛡️ Owner {action}: {username}")
             self._redirect(f"/owner/member/{username}")
+        elif path == "/owner/security":
+            ip = str(data.get("ip") or "").strip()
+            if data.get("action") == "unban" and waf.unban(ip):
+                log_activity("waf_unban", ip)
+                from denzbot import tg_notify
+                tg_notify(f"🛡️ Owner unban IP: {ip}")
+                self._html(_owner_security_page(
+                    msg=f"IP {ip} dibuka blokirnya.").encode())
+                return
+            self._redirect("/owner/security")
+        elif path == "/owner/visitors":
+            ip = str(data.get("ip") or "").strip()
+            action = data.get("action")
+            if action == "clear":
+                track.clear()
+                log_activity("visitors_clear", self._ip())
+                from denzbot import tg_notify
+                tg_notify("🗑️ Owner hapus semua data pengunjung.")
+                self._html(_owner_visitors_page(
+                    msg="Semua data pengunjung dihapus.").encode())
+                return
+            if action == "ban":
+                if waf.ban(ip, "manual oleh owner (panel pengunjung)"):
+                    log_activity("waf_manual_ban", ip)
+                    from denzbot import tg_notify
+                    tg_notify(f"⛔ Owner ban IP dari panel pengunjung: {ip}")
+                self._redirect("/owner/visitors")
+                return
+            if action == "unban":
+                if waf.unban(ip):
+                    log_activity("waf_unban", ip)
+                self._redirect(f"/owner/visitor/{urllib.parse.quote(ip)}")
+                return
+            self._redirect("/owner/visitors")
         else:
             self._redirect("/owner")
 
@@ -1737,6 +2299,23 @@ def _owner_login_page(cfg, msg="", err=""):
 # Entry
 # ---------------------------------------------------------------------------
 
+_TLS_CIPHERS = ("ECDHE+AESGCM:ECDHE+CHACHA20:EDH+AESGCM:EDH+CHACHA20:"
+                "!aNULL:!eNULL:!NULL:!MD5:!RC4:!DES:!3DES:!CBC:!SHA1:"
+                "!EXPORT:!PSK:!SRP:!DSS:!LOW:!CAMELLIA:!SEED:!IDEA")
+
+
+def _ssl_context(cert, key):
+    """SSLContext ter-harden: TLS 1.2+ & hanya cipher kuat (anti vuln
+    "Weak Cipher Suites"). Kompresi TLS dimatikan (anti CRIME)."""
+    import ssl
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_ciphers(_TLS_CIPHERS)
+    ctx.options |= ssl.OP_CIPHER_SERVER_PREFERENCE | ssl.OP_NO_COMPRESSION
+    ctx.load_cert_chain(cert, key)
+    return ctx
+
+
 def start_server(cfg=None, quiet=False):
     global _HTTPS
     cfg = cfg or load_config()
@@ -1745,10 +2324,8 @@ def start_server(cfg=None, quiet=False):
     srv = ThreadingHTTPServer((host, port), Handler)
     cert, key = (cfg.get("ssl_cert") or "").strip(), (cfg.get("ssl_key") or "").strip()
     if cert and key and Path(cert).exists() and Path(key).exists():
-        import ssl
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(cert, key)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        srv.socket = _ssl_context(cert, key).wrap_socket(
+            srv.socket, server_side=True)
         _HTTPS = True
         scheme = "https"
     else:
@@ -1758,6 +2335,10 @@ def start_server(cfg=None, quiet=False):
             print("[webdenz] peringatan: ssl_cert/ssl_key diisi tapi file tidak ada — pakai HTTP")
     if not quiet:
         print(f"[webdenz] server jalan di {scheme}://{host}:{port}")
+    if host in ("0.0.0.0", "::"):
+        print("[webdenz] ⚠️ keamanan: host 0.0.0.0 memaparkan server ke semua "
+              "antarmuka. Sebaiknya pakai 127.0.0.1 (akses hanya via tunnel "
+              "cloudflared). Ubah di webconfig.json → 'host'.")
     srv.serve_forever()
     return srv
 
