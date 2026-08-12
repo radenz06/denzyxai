@@ -227,6 +227,17 @@ class TestSecureConfig:
         assert "pesan dari denzyx" in html
         assert "403" in html
 
+    def test_error_page_marquee_all_codes(self, wd):
+        import webdenz
+        for code, title in ((403, "Akses Diblokir"),
+                            (404, "Halaman Tidak Ada"),
+                            (405, "Metode Tidak Diizinkan")):
+            html = webdenz._error_page(code, title, "coba-coba")
+            assert "KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN KALI" in html
+            assert "<marquee" in html
+            assert str(code) in html and title in html
+            assert "pesan dari denzyx" in html
+
     def test_tls_ciphers_hardening(self, wd, tmp_path):
         """TLS 1.2+ & cipher lemah diblokir (vuln Weak Cipher Suites)."""
         import ssl
@@ -466,10 +477,11 @@ class TestHTTP:
         try:
             st, h, body = self._post(port, "/login",
                                      {"username": "x", "password": "y"})
-            assert st == 200 and "CSRF" in body
+            assert st == 403 and "CSRF" in body
+            assert "KAMU BODOH BANGET SIH" in body
             st, h, body = self._post(port, "/owner/login",
                                      {"username": "denzyx", "password": "ownerpw"})
-            assert "CSRF" in body
+            assert st == 403 and "CSRF" in body
         finally:
             srv.shutdown()
             t.join(timeout=3)
@@ -772,6 +784,32 @@ class TestHTTP:
                 r.read()
             conn.close()
             assert 429 not in codes, f"false 429: {codes}"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_404_and_405_return_marquee_over_http(self, wd):
+        """404 & 405 lewat HTTP: status asli + halaman marquee KAMU BODOH."""
+        import urllib.request
+        import urllib.error
+        import webdenz
+        srv, t = self._start(wd)
+        port = srv.server_address[1]
+        try:
+            st, h, body = self._get(port, "/gak-ada-page-ini")
+            assert st == 404
+            assert "KAMU BODOH BANGET SIH" in body
+
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/login", method="PUT")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    st = r.status
+                    body = r.read().decode()
+            except urllib.error.HTTPError as e:
+                st, body = e.code, e.read().decode()
+            assert st == 405
+            assert "KAMU BODOH BANGET SIH" in body
         finally:
             srv.shutdown()
             srv.server_close()

@@ -721,8 +721,12 @@ def page(title, body, subtitle="member area"):
                         js=_JS, bot=bot_link, ver=_VER)
 
 
-def _blocked_page(reason=""):
-    """Halaman 403 untuk IP yang diblokir — marquee pesan dari denzyx."""
+def _error_page(code, title, reason="", note=""):
+    """Halaman error (404/403/405/dll) — marquee pesan dari denzyx.
+
+    Semua halaman error memakai marquee ini supaya yang iseng
+    scan/nyari-nyari website langsung 'down' & kapok. 😹
+    """
     msg = "KAMU BODOH BANGET SIH, JANGAN GITU YA LAIN KALI😹🖕"
     body = f"""<div style="text-align:center;padding:10vh 16px">
   <div style="font-size:56px">🚫</div>
@@ -734,12 +738,18 @@ def _blocked_page(reason=""):
                   box-shadow:0 8px 30px rgba(239,68,68,.35)">
     {html.escape(msg)}
   </marquee>
-  <h1 style="margin-top:36px;font-size:30px;color:#f87171">403 — Akses Diblokir</h1>
+  <h1 style="margin-top:36px;font-size:30px;color:#f87171">{code} — {html.escape(title)}</h1>
   <p style="margin:12px 0 0;color:var(--mut)">{html.escape(reason)}</p>
-  <p style="color:var(--mut)">IP kamu sudah masuk daftar hitam keamanan web ini.</p>
+  <p style="color:var(--mut)">{html.escape(note)}</p>
   <p style="margin-top:32px;font-size:14px;color:#64748b">pesan dari denzyx 😎</p>
 </div>"""
-    return page("403", body, subtitle="diblokir")
+    return page(str(code), body, subtitle="diblokir")
+
+
+def _blocked_page(reason=""):
+    """Halaman 403 untuk IP yang diblokir — marquee pesan dari denzyx."""
+    return _error_page(403, "Akses Diblokir", reason,
+                       "IP kamu sudah masuk daftar hitam keamanan web ini.")
 
 
 def _qr_source(cfg):
@@ -1789,6 +1799,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body_bytes.replace(b"__CSRF__", tok.encode()),
                    headers=hdr)
 
+    def _error(self, code, title, reason="", note=""):
+        """Halaman error 404/403/405 — marquee 'KAMU BODOH...' + status asli."""
+        if self._wants_json():
+            self._json(code, {"ok": False, "error": title})
+        else:
+            self._send(code, _error_page(code, title, reason, note).encode())
+
     def _rate_limit(self, key, max_hits, window_sec):
         cfg = load_config()
         return _RL.hit(key,
@@ -1826,6 +1843,36 @@ class Handler(BaseHTTPRequestHandler):
         if self._waf_guard():
             return
         self._send(204, b"")
+
+    def _do_unsupported(self):
+        """PUT/DELETE/PATCH/dll → 405 + marquee (biar iseng kena 😹)."""
+        try:
+            if self._prelude():
+                return
+            if self._waf_guard():
+                return
+            self._error(405, "Metode Tidak Diizinkan",
+                        f"{self.command} gak boleh di sini — jangan iseng 😹")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_PUT(self):
+        self._do_unsupported()
+
+    def do_DELETE(self):
+        self._do_unsupported()
+
+    def do_PATCH(self):
+        self._do_unsupported()
+
+    def do_HEAD(self):
+        self._do_unsupported()
+
+    def do_TRACE(self):
+        self._do_unsupported()
+
+    def do_CONNECT(self):
+        self._do_unsupported()
 
     def do_GET(self):
         try:
@@ -1883,7 +1930,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             if self._record_404():
                 return
-            self._html(page("404", "<p>404</p>").encode())
+            self._error(404, "Halaman Tidak Ada", "Yang kamu cari gak ada di sini 😹")
 
     def do_POST(self):
         try:
@@ -1920,45 +1967,45 @@ class Handler(BaseHTTPRequestHandler):
                                              secure=getattr(self, "_secure", False))}
                 self._redirect("/login", hdr)
             else:
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
         elif path == "/login":
             if not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._post_login(cfg, data)
         elif path == "/register":
             if not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._post_register(cfg, data)
         elif path == "/password":
             if not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._post_password(data)
         elif path == "/admin/add":
             if not self._auth_admin():
                 self._redirect("/chat")
             elif not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._post_admin_add(cfg, data)
         elif path == "/owner/login":
             if not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._post_owner_login(cfg, data)
         elif path.startswith("/owner"):
             if not self._auth_owner():
                 self._redirect("/owner")
             elif not self._csrf_ok(data):
-                self._html(page("403", "<p>Permintaan tidak valid (CSRF).</p>").encode())
+                self._error(403, "Permintaan Tidak Valid", "CSRF gagal — jangan iseng gitu ya 😹")
             else:
                 self._owner_post(path, data)
         else:
             if self._record_404():
                 return
-            self._html(page("404", "<p>404</p>").encode())
+            self._error(404, "Halaman Tidak Ada", "Yang kamu cari gak ada di sini 😹")
 
     # --- api json (untuk frontend vercel) ---
     def _api_register(self, data):
@@ -2318,7 +2365,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._html(_owner_member_page(m).encode())
         else:
-            self._html(page("404", "<p>404</p>").encode())
+            self._error(404, "Halaman Tidak Ada", "Yang kamu cari gak ada di sini 😹")
 
     def _owner_post(self, path, data):
         if path.startswith("/owner/member/"):
