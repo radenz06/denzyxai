@@ -1,8 +1,21 @@
 # denzyx AI
 
 <p align="center">
-  <img src="https://i.ibb.co.com/PsXhgTtd/profile.jpg" width="120" height="120" style="border-radius:28px; border:4px solid #e2e8f0" alt="Profile Denzyx">
+  <img 
+    src="https://i.ibb.co.com/PsXhgTtd/profile.jpg" 
+    width="120" 
+    height="120" 
+    style="border-radius:50%; border:4px solid #e2e8f0; object-fit:cover; animation: spin 10s linear infinite;"
+    alt="Profile Denzyx"
+  >
 </p>
+
+<style>
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+</style>
 
 <p align="center">
   <b>Denzyx AI</b> — asisten AI all-in-one di Termux/Linux
