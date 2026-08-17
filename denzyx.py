@@ -182,6 +182,7 @@ AUTH_PATHS = [
     Path(os.path.expanduser("~/.opencode/auth.json")),
 ]
 
+ZEN_UA = "opencode"   # UA ini lolos rate-limit zen; browser UA kena 429
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -279,6 +280,8 @@ class State:
         self._last_key = None
         self._key_changed = False
         self._used_public = False  # key ditolak -> fallback FREE
+        self.guard = None          # instruksi ekstra (web chat): tolak akses sistem
+        self.system_override = None  # system prompt khusus (web chat), jika ada
 
     @property
     def url(self):
@@ -290,7 +293,7 @@ class State:
     def system(self):
         # dibaca FRESH tiap request -> edit system_prompt.md langsung aktif,
         # tanpa restart, berlaku untuk sesi lama maupun baru
-        return load_system_prompt()
+        return self.system_override if self.system_override else load_system_prompt()
 
     @property
     def key(self):
@@ -412,7 +415,7 @@ def _api_stream(state, msgs, tools, out_queue, stop_evt=None, timeout=180,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {key}",
-                "User-Agent": USER_AGENT,
+                "User-Agent": ZEN_UA if not state.direct else USER_AGENT,
             },
             method="POST",
         )
@@ -528,6 +531,8 @@ def stream_chat(state, prompt, out_queue, stop_evt=None):
         messages.append({"role": "system", "content": state.system})
     messages.append({"role": "system",
                      "content": f"Folder kerja aktif: {state.cwd}"})
+    if state.guard:
+        messages.append({"role": "system", "content": state.guard})
     messages.extend(state.messages)
     messages.append({"role": "user", "content": prompt})
     messages = _compact_context(state, messages)
@@ -658,7 +663,7 @@ def _summarize(state, text):
             state.url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {key}",
-                     "User-Agent": USER_AGENT},
+                     "User-Agent": ZEN_UA if not state.direct else USER_AGENT},
             method="POST")
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode("utf-8", errors="replace"))
@@ -1226,6 +1231,7 @@ _PASTE_END = 2001     # \x1b[201~ (akhir bracketed paste)
 _KEY_ALT_ENTER = 2002     # \x1b\r — baris baru lembut (tidak kirim pesan)
 _KEY_SHIFT_ENTER = 2003   # \x1b[13;2u / \x1b[27;2;13~ — baris baru lembut
 _KEY_CLICK = 2004         # klik mouse SGR (\x1b[<b;x;yM) — posisi di _click_pos
+_KEY_TOOL_VIEW = 2005     # ctrl+alt+v — tampil overlay log tool
 _click_pos = (0, 0)       # koordinat klik terakhir (x, y), 1-based layar
 
 _input_q = queue.Queue()
@@ -1453,6 +1459,8 @@ def _next_key_inner(timeout=-1):
         return _KEY_ALT_ENTER  # alt+enter
     if seq in ("[13;2u", "[27;2;13~", "[13;5u", "[13;13~"):
         return _KEY_SHIFT_ENTER  # shift+enter / ctrl+enter (kitty/xterm)
+    if seq in ("\x1bv", "[27;6;118~", "[118;6u"):
+        return _KEY_TOOL_VIEW  # ctrl+alt+v (ESC-ESC-v / kitty CSI-u / xterm)
     fkey = {"OP": curses.KEY_F1, "OQ": curses.KEY_F2, "OR": curses.KEY_F3,
             "OS": curses.KEY_F4, "[15~": curses.KEY_F5, "[17~": curses.KEY_F6,
             "[18~": curses.KEY_F7, "[19~": curses.KEY_F8, "[20~": curses.KEY_F9,
@@ -2204,6 +2212,12 @@ def chat_screen(stdscr, state):
     sug_sel = 0          # index terpilih di popup sugesti slash (/…)
     sug_win = None       # window popup sugesti (dibuat saat aktif)
     sug_rect = (0, 0, 0, 0)  # posisi popup terakhir (y, h, x, w) utk erase
+    tool_log = []        # log aktivitas tool (overlay: tool_pending/result)
+    tool_view = False    # overlay tool full (ctrl+alt+v) terbuka
+    tool_vw = tool_vh = 0  # ukuran window overlay terakhir
+    win_tool = None      # window overlay tool
+    tool_scroll = 0      # offset scroll di overlay tool
+    tool_follow = True   # ikut ke bawah di overlay tool
 
     STYLE_ATTR = {
         "user":        curses.color_pair(2) | curses.A_BOLD,
@@ -2578,10 +2592,10 @@ def chat_screen(stdscr, state):
             elif m["role"] == "system" and m["content"]:
                 msgs.append({"role": "system", "text": m["content"]})
             elif m["role"] == "tool" and m.get("diff"):
-                msgs.append({"role": "tool", "text":
-                             (m["content"] or "").splitlines()[0][:120]
-                             if (m["content"] or "").strip() else "✎ file diubah"})
-                msgs.append({"role": "diff", "text": m["diff"]})
+                tool_log.append({"role": "tool", "text":
+                                 (m["content"] or "").splitlines()[0][:120]
+                                 if (m["content"] or "").strip() else "✎ file diubah"})
+                tool_log.append({"role": "diff", "text": m["diff"]})
 
     load_msgs()
 
@@ -3134,7 +3148,7 @@ def chat_screen(stdscr, state):
             q = f"📥 {len(msg_queue)} antrean · " if msg_queue else ""
             if streaming:
                 if active_tool:
-                    base = f"🔧 {active_tool}"
+                    base = f"🔧 {active_tool} — ctrl+alt+v: log tool"
                 elif thinking:
                     base = "⋯ AI berpikir…"
                 else:
@@ -3304,6 +3318,64 @@ def chat_screen(stdscr, state):
         except curses.error:
             pass
 
+    def render_tool_overlay(h, w, sb):
+        """Overlay log aktivitas tool — mengambang di atas output.
+        tool_view: full (ctrl+alt+v). Kalau tidak: kotak kecil floating
+        yang muncul otomatis saat tool berjalan."""
+        nonlocal tool_vw, tool_vh, tool_scroll, tool_follow
+        if tool_view:
+            if not tool_log:
+                return
+        elif not active_tool:
+            return
+        if tool_view:
+            th, tw = h - 2, max(40, w - sb - 2)
+            ty, tx = 1, sb + 1
+        else:
+            th, tw = 9, max(40, w - sb - 2)
+            ty, tx = max(1, h - 7 - th), sb + 1
+        if th < 3 or tw < 10:
+            return
+        try:
+            if (win_tool is None or tool_vh != th or tool_vw != tw):
+                win_tool = curses.newwin(th, tw, ty, tx)
+                tool_vh, tool_vw = th, tw
+            else:
+                win_tool.mvwin(ty, tx)
+            win_tool.erase()
+            title = (" 🔧 LOG TOOL — ctrl+alt+v tutup · scroll ↑↓ " if tool_view
+                     else f" 🔧 {active_tool or 'tool'} — ctrl+alt+v: log penuh ")
+            draw_frame(win_tool, title, "")
+            rows = []
+            for e in tool_log:
+                for ln in wrap_text(e["text"], tw - 4) or [""]:
+                    rows.append((e["role"], ln))
+            total = len(rows)
+            visible = th - 2
+            mx = max(0, total - visible)
+            if tool_follow:
+                tool_scroll = mx
+            tool_scroll = max(0, min(tool_scroll, mx))
+            y = 1
+            for i in range(tool_scroll, min(total, tool_scroll + visible)):
+                role, ln = rows[i]
+                try:
+                    win_tool.addnstr(y, 1, clip_width(ln, tw - 2), tw - 2,
+                                     STYLE_ATTR.get(role, 0))
+                except curses.error:
+                    pass
+                y += 1
+            if not tool_view and total > visible:
+                try:
+                    win_tool.addnstr(th - 1, 1,
+                                     f" ^ {total} baris — ↑↓/PgUp/PgDn ",
+                                     tw - 2, curses.A_DIM)
+                except curses.error:
+                    pass
+            win_tool.noutrefresh()
+        except curses.error:
+            pass
+
     while True:
         if leave:
             return  # /menu atau ctrl+u → kembali ke menu utama
@@ -3402,20 +3474,23 @@ def chat_screen(stdscr, state):
         win_in.noutrefresh()
         win_out.noutrefresh()
         render_suggestions(h, w, sb)
+        render_tool_overlay(h, w, sb)
         curses.doupdate()
 
         if streaming:
             # proses queue
-            got = False
             try:
                 while True:
                     kind, text = out_q.get_nowait()
-                    got = True
                     if kind == "content":
                         thinking = False  # AI mulai mengetik jawaban
                         had_activity = True
-                        if (msgs and msgs[-1]["role"] in
-                                ("tool", "tool_out", "reasoning")):
+                        if msgs and msgs[-1]["role"] in ("tool", "tool_out"):
+                            # jawaban final SETELAH tool dieksekusi → pesan
+                            # assistant BARU di bawah hasil tool (jangan
+                            # nyambung ke pesan lama di atas tool = acak)
+                            msgs.append({"role": "assistant", "text": text})
+                        elif msgs and msgs[-1]["role"] in ("reasoning",):
                             # sambung ke pesan assistant terakhir — jangan
                             # bikin label AI DENZYX ganda (kesan ngespam)
                             for _i in range(len(msgs) - 1, -1, -1):
@@ -3424,8 +3499,10 @@ def chat_screen(stdscr, state):
                                     break
                             else:
                                 msgs.append({"role": "assistant", "text": text})
-                        else:
+                        elif msgs and msgs[-1]["role"] == "assistant":
                             msgs[-1]["text"] += text
+                        else:
+                            msgs.append({"role": "assistant", "text": text})
                         if state.messages and state.messages[-1]["role"] == "assistant":
                             state.messages[-1]["content"] += text
                         dirty = True
@@ -3465,8 +3542,9 @@ def chat_screen(stdscr, state):
                             msgs.pop()
                         for c in text:
                             args_txt = c["arguments"][:160] or "{}"
-                            msgs.append({"role": "tool",
-                                         "text": f"{c['name']} {args_txt}"})
+                            tool_log.append(
+                                {"role": "tool",
+                                 "text": f"{c['name']} {args_txt}"})
                         if len(text) > 1:
                             active_tool = f"{text[0]['name']} +{len(text) - 1}"
                         else:
@@ -3479,9 +3557,10 @@ def chat_screen(stdscr, state):
                         active_tool = None  # tool selesai dijalankan
                         had_activity = True
                         shown = result.replace("\n", " ")[:400]
-                        msgs.append({"role": "tool_out", "text": f"-> {shown}"})
+                        tool_log.append({"role": "tool_out",
+                                         "text": f"-> {shown}"})
                         if diff:
-                            msgs.append({"role": "diff", "text": diff})
+                            tool_log.append({"role": "diff", "text": diff})
                         dirty = True
                     elif kind == "note":
                         msgs.append({"role": "reasoning", "text": text})
@@ -3506,9 +3585,10 @@ def chat_screen(stdscr, state):
                         drain_queue()   # antrean dikirim otomatis saat idle
             except queue.Empty:
                 pass
-            if got:
-                continue
-            # non-blocking saat streaming: proses antrian terus-terusan
+            # baca tombol TETAP jalan saat streaming (jangan skip) —
+            # dulu `if got: continue` bikin key kelaparan: selama AI
+            # mengetik cepat, queue hampir tak pernah kosong → scroll
+            # (PgUp/wheel/panah) tidak pernah diproses.
             ch = _next_key(0.05)
         else:
             # idle: tunggu input (blocking, dari thread reader).
@@ -3530,6 +3610,52 @@ def chat_screen(stdscr, state):
             continue
 
         last_paste_activity = time.monotonic()
+
+        if ch == _KEY_TOOL_VIEW:
+            tool_view = not tool_view
+            tool_follow = True
+            dirty = True
+            continue
+
+        if tool_view:
+            # overlay tool full: semua tombol untuk navigasi overlay
+            if ch == 27:
+                tool_view = False
+                dirty = True
+            elif ch == curses.KEY_PPAGE:
+                tool_scroll = max(0, tool_scroll - max(1, tool_vh - 4))
+                tool_follow = False
+                dirty = True
+            elif ch == curses.KEY_NPAGE:
+                tool_scroll += max(1, tool_vh - 4)
+                tool_follow = False
+                dirty = True
+            elif ch == curses.KEY_HOME:
+                tool_scroll = 0
+                tool_follow = False
+                dirty = True
+            elif ch == curses.KEY_END:
+                tool_follow = True
+                dirty = True
+            elif ch in (curses.KEY_UP, curses.KEY_DOWN):
+                if ch == curses.KEY_UP:
+                    tool_scroll = max(0, tool_scroll - 1)
+                    tool_follow = False
+                else:
+                    tool_scroll += 1
+                dirty = True
+            elif ch == curses.KEY_MOUSE:
+                try:
+                    _, _, _, _, bstate = curses.getmouse()
+                    if bstate & curses.BUTTON4_PRESSED:      # wheel up
+                        tool_scroll = max(0, tool_scroll - 3)
+                        tool_follow = False
+                    elif bstate & curses.BUTTON5_PRESSED:    # wheel down
+                        tool_scroll += 3
+                    dirty = True
+                except curses.error:
+                    pass
+            continue
 
         if pending_tools is not None:
             # mode konfirmasi tool — input prompt nonaktif
