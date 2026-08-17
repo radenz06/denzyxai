@@ -79,12 +79,99 @@ def _geo_ok():
     return _GEO_FLAG
 
 
+# VPN/proxy detection using known IP ranges (simplified)
+# For production, integrate with ip2location/maxmind databases
+_VPN_RANGES = [
+    "103.236.0.0/16",   # Some VPN services
+    "103.241.0.0/16",
+    "103.242.0.0/16",
+    "45.11.0.0/16",     # Some VPNs
+    "45.130.0.0/16",
+    "45.131.0.0/16",
+    "72.21.0.0/16",     # HMA
+    "72.22.0.0/15",
+    "104.16.0.0/13",    # Cloudflare proxies
+    "104.17.0.0/16",
+    "104.18.0.0/16",
+    "104.19.0.0/16",
+    "172.64.0.0/13",    # Cloudflare
+    "173.245.48.0/21",
+    "203.0.113.0/24",   # TEST-NET-3
+    "198.51.100.0/24",  # DOCS-NET
+    "207.46.0.0/16",
+    "209.123.0.0/16",
+    "216.155.0.0/16",
+    "24.192.0.0/11",
+    "63.142.0.0/16",
+    "64.233.0.0/16",
+    "66.220.0.0/15",
+    "69.164.0.0/16",
+    "72.14.0.0/16",
+    "72.32.0.0/14",
+    "103.21.0.0/16",
+    "103.22.0.0/15",
+    "103.31.0.0/16",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "108.162.0.0/16",
+    "131.0.72.0/22",
+    "131.0.112.0/22",
+    "131.0.160.0/20",
+    "131.0.192.0/21",
+    "132.148.0.0/15",
+    "151.101.0.0/17",
+    "151.101.128.0/17",
+    "207.124.0.0/14",
+    "209.222.0.0/15",
+    "216.239.0.0/16",
+    "240.0.0.0/4",
+    "255.255.255.255",
+]
+
+
+def _is_vpn_or_proxy(ip_str):
+    """Detect if IP is likely from a VPN/proxy service.
+    
+    Uses simplified CIDR-based detection against known VPN/proxy ranges.
+    In production would integrate with ip2location/maxmind databases for
+    comprehensive detection. Returns True if IP matches known VPN/proxy
+    patterns, False otherwise.
+    """
+    ip = str(ip_str or "").strip()
+    if not ip:
+        return False
+    # Remove loopback, private, reserved from VPN check
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(ip.split("%", 1)[0])
+        # Skip if already classified as private/reserved
+        if a.is_private or a.is_reserved or a.is_link_local or a.is_loopback:
+            return False
+    except ValueError:
+        return False
+    
+    # Check against known VPN/proxy CIDR ranges
+    for cidr in _VPN_RANGES:
+        try:
+            import ipaddress
+            network = ipaddress.ip_network(cidr, strict=False)
+            address = ipaddress.ip_address(ip.split("%", 1)[0])
+            if address in network:
+                return True
+        except (ValueError, TypeError):
+            continue
+    
+    # Heuristic: if geo info is available and shows hosting/proxy,
+    # flag it (would need actual geo database integration)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Klasifikasi IP
 # ---------------------------------------------------------------------------
 
 def ip_class(ip):
-    """'public' | 'private' | 'loopback' | 'invalid'."""
+    """'public' | 'private' | 'loopback' | 'invalid' | 'vpn' | 'proxy'."""
     ip = str(ip or "").strip()
     if not ip:
         return "invalid"
@@ -96,6 +183,12 @@ def ip_class(ip):
         return "loopback"
     if a.is_private or a.is_reserved or a.is_link_local:
         return "private"
+    # Check against known VPN/proxy IP ranges (simplified)
+    # In production would integrate with ip2location/maxmind databases
+    if _is_vpn_or_proxy(ip):
+        return "vpn"
+    if a.is_global:
+        return "public"
     return "public"
 
 
