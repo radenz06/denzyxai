@@ -136,42 +136,70 @@ def _cmd_status(cfg):
     active = sum(1 for m in members if webdenz.member_status(m) == "active")
     pending = sum(1 for m in members if webdenz.member_status(m) == "pending")
     banned = sum(1 for m in members if webdenz.member_status(m) == "banned")
+    # Rupiah cepat tanpa import _idr dari luar
+    price_fmt = f"{cfg.get('price_idr'):,}".replace(",", ".")
+    rows = []
+    for m in sorted(members, key=lambda x: x.get("username", "")):
+        st = webdenz.member_status(m)
+        role = " 👑" if webdenz.is_admin(m) else ""
+        u = m.get('username')
+        exp = m.get('expires_at') or "-"
+        # hitungan sisa hari sederhana
+        try:
+            from datetime import datetime, timedelta
+            exp_d = datetime.fromisoformat(exp) if exp else None
+            now = datetime.now()
+            sisa = max(0, (exp_d - now).days) if exp_d else None
+            sisa_txt = f"{sisa} hari" if sisa is not None else "tidak terbatas"
+        except Exception:
+            sisa_txt = "-"
+        rows.append(f"🟢 {u} {role} · {st} · s/d {exp} · {sisa_txt}")
+    tbl = "\n".join(rows) if rows else "Belum ada member."
     return (f"📊 Status denzyx web\n"
             f"Server: {cfg.get('host')}:{cfg.get('port')}\n"
-            f"Member: {len(members)} · aktif {active} · pending {pending} · "
-            f"banned {banned}\n"
-            f"Harga: Rp {cfg.get('price_idr'):,} / {cfg.get('sub_days')} hari\n"
-            f"Owner: {cfg.get('owner', {}).get('username')}")
+            f"Member: {len(members)} · aktif {active} · pending {pending} · banned {banned}\n"
+            f"Harga: Rp {price_fmt} / {cfg.get('sub_days')} hari\n"
+            f"Owner: {cfg.get('owner', {}).get('username')}\n\n"
+            f"👥 Member list:\n{tbl}")
 
 
 def _cmd_members(_cfg):
     members = webdenz.list_members()
     if not members:
-        return "Belum ada member."
+        return "Belum ada member.\n\n💡 Pakai /addmember <user> <pass> [hari] untuk menambah."
     lines = ["👥 Member:"]
+    keyrows = []
     for m in sorted(members, key=lambda x: x.get("username", "")):
         st = webdenz.member_status(m)
         exp = (m.get("expires_at") or "-")[:10]
-        role = " 👑ADMIN" if webdenz.is_admin(m) else ""
-        lines.append(f"- {m.get('username')}{role} [{st}] s/d {exp}")
-    return "\n".join(lines)
+        role = " 👑" if webdenz.is_admin(m) else ""
+        u = m.get('username')
+        lines.append(f"- {u}{role} [{st}] s/d {exp}")
+        # Add inline keyboard row per member for quick actions
+        keyrows.append([{"text": f"•{u} •{st}", "callback_data": f"/member {u}"}])
+    return "\n".join(lines) + f"\n\n⚡ Quick actions: ban/unban/activate via tombol di bawah." + "\n".join(
+        f"{i+1}. /ban {m.get('username')}" for i, m in enumerate(members[:5]))
 
 
 def _cmd_member(_cfg, arg):
     m = webdenz.load_member(arg)
     if not m:
-        return f"Member tidak ada: {arg}"
-    try:
-        pw = webdenz.dec_secret(m["password"])
-    except Exception:  # noqa: BLE001
-        pw = "(gagal decrypt)"
-    return (f"👤 {m.get('username')} [{webdenz.member_status(m)}]\n"
-            f"Role: {m.get('role') or 'member'}\n"
-            f"Nama: {m.get('display_name')}\n"
-            f"Password: {pw}\n"
-            f"Aktif s/d: {m.get('expires_at') or '-'}\n"
+        return f"✖ Member tidak ada: {arg}"
+    pw = webdenz.dec_secret(m["password"]) if m.get("password") else "(password terenkripsi)"
+    st = webdenz.member_status(m)
+    exp = m.get('expires_at') or "-"
+    role = " 👑" if webdenz.is_admin(m) else ""
+    created = m.get('created_at') or "-"
+    lastlogin = m.get('last_login') or "-"
+    loginc = m.get('login_count', 0)
+    return (f"👤 {m.get('username')}{role}\n"
+            f"Status: {st}\n"
+            f"Nama: {m.get('display_name') or '-'}\n"
+            f"Daftar: {created}\n"
+            f"Login: {loginc}x · {lastlogin}\n"
+            f"Aktif s/d: {exp}\n"
             f"IP: {m.get('ip') or '-'}\n"
-            f"Login: {m.get('login_count', 0)}x · {m.get('last_login') or '-'}")
+            f"Password: {pw}")
 
 
 def _cmd_logs(_cfg, n=12):

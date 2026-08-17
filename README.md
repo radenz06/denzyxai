@@ -1,14 +1,20 @@
+# denzyx AI
+
 <p align="center">
-  <img src="docs/logo.jpg" width="120" height="120" style="border-radius:28px" alt="denzyx AI">
+  <img src="https://i.ibb.co.com/PsXhgTtd/profile.jpg" width="120" height="120" style="border-radius:28px; border:4px solid #e2e8f0" alt="Profile Denzyx">
 </p>
 
 <p align="center">
-  <img src="docs/banner.svg" width="100%" alt="denzyx AI banner">
+  <b>Denzyx AI</b> — asisten AI all-in-one di Termux/Linux
 </p>
 
 <p align="center">
+  <img src="docs/banner.svg" width="100%" alt="denzyx AI banner" style="max-width:600px; margin:16px 0">
+</p>
+
+<p align="center">
+  <a href="https://github.com/radenz06/denzyxai"><img src="https://img.shields.io/badge/GitHub-repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
-  <a href="https://github.com/radenz06/denzyxai/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License"></a>
   <a href="https://www.gnu.org/software/bash/"><img src="https://img.shields.io/badge/Platform-Termux/Linux-4F7CFF?style=for-the-badge&logo=linux&logoColor=white" alt="Platform"></a>
   <img src="https://img.shields.io/badge/Status-Active-22c55e?style=for-the-badge" alt="Status">
 </p>
@@ -157,17 +163,18 @@ python3 denzbot.py               # bot Telegram
 ## 🛡️ Keamanan & Etika
 
 - Web chat memakai **system prompt khusus**: user yang minta akses server/terminal
-  ditolak mentah-mentah (`ACCESS DENIED`) — web hanya untuk ngobrol biasa
+  ditolak mentah-mentar (`ACCESS DENIED`) — web hanya untuk ngobrol biasa
 - Tool pentest hanya berjalan **legal & berizin** (target milik sendiri / kontrak),
   dengan cleanup otomatis dan tanpa merusak
 - Config, password, dan data member **terenkripsi** (Fernet), tidak ada data di cloud
-- WAF bawaan memblokir IP mencurigakan; semua form pakai CSRF token
+- WAF bawaan memblokir IP; semua form pakai CSRF token
 
 ---
 
 ## 🤝 Kontribusi
 
 Pull request dipersilakan. Untuk perubahan besar, buka issue dulu ya.
+
 Lihat [CONTRIBUTING.md](CONTRIBUTING.md) untuk panduan.
 
 ---
