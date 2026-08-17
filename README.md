@@ -2,7 +2,7 @@
 
 <p align="center">
   <img 
-    src="https://i.ibb.co.com/PsXhgTtd/profile.jpg" 
+    src="docs/logo.jpg" 
     width="120" 
     height="120" 
     style="border-radius:50%; border:4px solid #e2e8f0; object-fit:cover; animation: spin 10s linear infinite;"
