@@ -1,24 +1,11 @@
 # denzyx AI
 
 <p align="center">
-  <img 
-    src="docs/logo.jpg" 
-    width="120" 
-    height="120" 
-    style="border-radius:50%; border:4px solid #e2e8f0; object-fit:cover; animation: spin 10s linear infinite;"
-    alt="Profile Denzyx"
-  >
+  <img src="docs/logo.jpg" width="120" height="120" style="border-radius:28px; border:4px solid #e2e8f0;" alt="denzyx AI">
 </p>
 
-<style>
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-</style>
-
 <p align="center">
-  <b>Denzyx AI</b> — asisten AI all-in-one di Termux/Linux
+  <b>Denzyx AI</b> — Asisten AI all-in-one di Termux/Linux
 </p>
 
 <p align="center">
@@ -28,60 +15,50 @@
 <p align="center">
   <a href="https://github.com/radenz06/denzyxai"><img src="https://img.shields.io/badge/GitHub-repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
-  <a href="https://www.gnu.org/software/bash/"><img src="https://img.shields.io/badge/Platform-Termux/Linux-4F7CFF?style=for-the-badge&logo=linux&logoColor=white" alt="Platform"></a>
   <img src="https://img.shields.io/badge/Status-Active-22c55e?style=for-the-badge" alt="Status">
 </p>
 
-> **denzyx AI** — asisten AI all-in-one yang jalan di Termux/Linux: TUI chat dengan tool calling, web member area bergaya DeepSeek, bot Telegram, dan auto-reply 24 jam. Dibangun modular supaya gampang dikembangkan jadi apapun.
+> **denzyx AI** — asisten AI modular: TUI chat, web member area, bot Telegram, auto-reply 24 jam.
 
 ---
 
-## 🚀 Project Overview
+## 🚀 Overview
 
-denzyx AI adalah ekosistem AI personal yang lengkap: ngobrol di **terminal** dengan tool calling (shell, file, web, git, build), akses **perangkat Android** (baterai, GPS, SMS, kontak, notifikasi), **web chat** modern dengan streaming, plus **bot Telegram** buat ngelola langganan member.
+sebuat ekosistem AI personal: terminal (tool calling, device API), web chat (DeepSeek-style), bot Telegram (member management), plus auto-reply 24 jam. Modular design untuk gampang dikembangkan.
 
 **Primary goals:**
-- Satu AI untuk semua permukaan: terminal, web, Telegram, voice
-- Tool calling yang aman & terkontrol (legal-only pentest, guard anti akses sistem di web)
-- Member area berbayar dengan QR pembayaran + konfirmasi otomatis (OCR)
-- Semua data lokal & terenkripsi (Fernet), tanpa cloud pihak ketiga
+- Satu AI untuk semua permukaan
+- Tool calling yang aman & terkontrol
+- Member area berbayar dengan QR + OCR
+- Semua data lokal & terenkripsi (Fernet)
 
 ---
 
-## 🎯 Key Features
+## ✨ Key Features
 
 | Area | Fitur |
 |---|---|
-| 🖥️ **TUI Terminal** | Chat curses, navigasi keyboard, theme kustom, streaming delta, reasoning |
-| 🛠️ **Tool Calling** | Shell, file, web, git, build, sdk Android, device (HP), locate (GPS), pentest legal |
+| 🖥️ **TUI Terminal** | Chat curses, navigasi keyboard, theme kustom, streaming delta |
+| 🛠️ **Tool Calling** | Shell, file, web, git, build, SDK Android, device (HP), locate (GPS), pentest legal |
 | 🌐 **Web Chat** | UI ala DeepSeek: welcome screen, bubble + salin, streaming + stop, markdown, panel model sendiri |
-| 📱 **Akses HP** | Baterai, clipboard, notifikasi, torch, volume, SMS, kontak, lokasi (via Termux-API) |
+| 📱 **Akses HP** | Baterai, clipboard, notifikasi, torch, volume, SMS, kontak, lokasi (Termux-API) |
 | 🤖 **Bot Telegram** | Notifikasi, konfirmasi pembayaran, kelola member, auto-reply |
-| ⏰ **Auto-reply 24 jam** | Daemon `auto-denz.py` yang nanggepin notifikasi otomatis |
-| 🎙️ **Voice Chat** | STT/TTS via Termux-API (opsional) |
-| 💳 **Langganan** | QR pembayaran, OCR bukti transfer (`payocr.py`), masa aktif per member |
-| 🔐 **Keamanan** | WAF blokir IP, CSRF, config & data terenkripsi (Fernet), lisensi berpassword |
+| ⏰ **Auto-reply 24 jam** | Daemon otomatis |
+| 💳 **Langganan** | QR pembayaran, OCR bukti transfer, masa aktif per member |
+| 🔐 **Keamanan** | WAF blokir IP, CSRF, data terenkripsi (Fernet), lisensi berpassword |
 
 ---
 
-## ▶️ Demo Aplikasi — Visual Mockup
+## ▶️ Demo
 
-> Mockup SVG di bawah ini render langsung di GitHub. Versi aslinya bisa dicoba lewat terminal atau web member area.
-
-### 🌐 Web Chat (halaman utama member)
+> Mockup SVG di bawah ini render langsung di GitHub.
 
 <p align="center">
   <img src="docs/mockup-chat.svg" width="100%" alt="Web chat mockup">
 </p>
-
-### 🖥️ Terminal TUI
-
 <p align="center">
   <img src="docs/mockup-terminal.svg" width="100%" alt="Terminal TUI mockup">
 </p>
-
-### 📱 Tampilan Mobile
-
 <p align="center">
   <img src="docs/mockup-phone.svg" width="280" alt="Phone mockup">
 </p>
@@ -142,10 +119,9 @@ cd denzyxai
 
 ---
 
-## 📖 Pakai
+## 📖 Cara Pakai
 
 ### Terminal (TUI)
-
 ```sh
 ./denzyx              # masuk ke TUI
 ./denzyx --help       # opsi baris perintah
@@ -153,18 +129,16 @@ cd denzyxai
 ```
 
 ### Web member area
-
 ```sh
 python3 webdenz.py            # jalan di http://localhost:8000
 # akses dari luar:
 cloudflared tunnel --url http://localhost:8000
 ```
 
-Fitur web: registrasi + login member, chat AI streaming, panel model AI sendiri
-(API key & endpoint milik user), status langganan, bayar via QR.
+Fitur: registrasi + login member, chat AI streaming, panel model AI sendiri
+(status langganan, bayar via QR).
 
 ### Panel owner & daemon
-
 ```sh
 python3 admin-denz.py            # kelola member, setup, restart
 python3 auto-denz.py install     # auto-reply 24 jam
@@ -175,10 +149,8 @@ python3 denzbot.py               # bot Telegram
 
 ## 🛡️ Keamanan & Etika
 
-- Web chat memakai **system prompt khusus**: user yang minta akses server/terminal
-  ditolak mentah-mentar (`ACCESS DENIED`) — web hanya untuk ngobrol biasa
-- Tool pentest hanya berjalan **legal & berizin** (target milik sendiri / kontrak),
-  dengan cleanup otomatis dan tanpa merusak
+- Web chat memakai **system prompt khusus**: user yang minta akses server/terminal ditolak mentah-mentar (`ACCESS DENIED`) — web hanya untuk ngobrol biasa
+- Tool pentest hanya berjalan **legal & berizin** (target milik sendiri / kontrak), dengan cleanup otomatis dan tanpa merusak
 - Config, password, dan data member **terenkripsi** (Fernet), tidak ada data di cloud
 - WAF bawaan memblokir IP; semua form pakai CSRF token
 
@@ -197,5 +169,5 @@ Lihat [CONTRIBUTING.md](CONTRIBUTING.md) untuk panduan.
 MIT — lihat [LICENSE](LICENSE).
 
 <p align="center">
-  <sub>dibuat dengan 🖤 oleh <a href="https://github.com/radenz06">radenz06</a></sub>
+  <sub>dibuat dengan 🖸 oleh <a href="https://github.com/radenz06">radenz06</a></sub>
 </p>
