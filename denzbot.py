@@ -136,7 +136,6 @@ def _cmd_status(cfg):
     active = sum(1 for m in members if webdenz.member_status(m) == "active")
     pending = sum(1 for m in members if webdenz.member_status(m) == "pending")
     banned = sum(1 for m in members if webdenz.member_status(m) == "banned")
-    # Rupiah cepat tanpa import _idr dari luar
     price_fmt = f"{cfg.get('price_idr'):,}".replace(",", ".")
     rows = []
     for m in sorted(members, key=lambda x: x.get("username", "")):
@@ -144,7 +143,6 @@ def _cmd_status(cfg):
         role = " 👑" if webdenz.is_admin(m) else ""
         u = m.get('username')
         exp = m.get('expires_at') or "-"
-        # hitungan sisa hari sederhana
         try:
             from datetime import datetime, timedelta
             exp_d = datetime.fromisoformat(exp) if exp else None
@@ -155,18 +153,26 @@ def _cmd_status(cfg):
             sisa_txt = "-"
         rows.append(f"🟢 {u} {role} · {st} · s/d {exp} · {sisa_txt}")
     tbl = "\n".join(rows) if rows else "Belum ada member."
+    markup = {
+        "inline_keyboard": [
+            [{"text": "🔄 Refresh", "callback_data": "/status"},
+             {"text": "👥 Members", "callback_data": "/members"}],
+            [{"text": "➕ Add Member", "callback_data": "/addmember"},
+             {"text": "🛡 Keamanan", "callback_data": "/bans"}],
+        ]
+    }
     return (f"📊 Status denzyx web\n"
             f"Server: {cfg.get('host')}:{cfg.get('port')}\n"
             f"Member: {len(members)} · aktif {active} · pending {pending} · banned {banned}\n"
             f"Harga: Rp {price_fmt} / {cfg.get('sub_days')} hari\n"
             f"Owner: {cfg.get('owner', {}).get('username')}\n\n"
-            f"👥 Member list:\n{tbl}")
+            f"👥 Member list:\n{tbl}", markup)
 
 
 def _cmd_members(_cfg):
     members = webdenz.list_members()
     if not members:
-        return "Belum ada member.\n\n💡 Pakai /addmember <user> <pass> [hari] untuk menambah."
+        return "Belum ada member.\n\n💡 Pakai /addmember <user> <pass> [hari] untuk menambah.", None
     lines = ["👥 Member:"]
     keyrows = []
     for m in sorted(members, key=lambda x: x.get("username", "")):
@@ -176,15 +182,22 @@ def _cmd_members(_cfg):
         u = m.get('username')
         lines.append(f"- {u}{role} [{st}] s/d {exp}")
         # Add inline keyboard row per member for quick actions
-        keyrows.append([{"text": f"•{u} •{st}", "callback_data": f"/member {u}"}])
-    return "\n".join(lines) + f"\n\n⚡ Quick actions: ban/unban/activate via tombol di bawah." + "\n".join(
-        f"{i+1}. /ban {m.get('username')}" for i, m in enumerate(members[:5]))
+        keyrows.append([{"text": f"•{u} {st}", "callback_data": f"/member {u}"}])
+    tbl = "\n".join(lines)
+    markup = {
+        "inline_keyboard": keyrows
+        + [
+            [{"text": "➕ Add Member", "callback_data": "/addmember"}],
+            [{"text": "🔄 Refresh", "callback_data": "/members"}],
+        ]
+    }
+    return (tbl, markup)
 
 
 def _cmd_member(_cfg, arg):
     m = webdenz.load_member(arg)
     if not m:
-        return f"✖ Member tidak ada: {arg}"
+        return "✖ Member tidak ada: " + arg, None
     pw = webdenz.dec_secret(m["password"]) if m.get("password") else "(password terenkripsi)"
     st = webdenz.member_status(m)
     exp = m.get('expires_at') or "-"
@@ -192,7 +205,7 @@ def _cmd_member(_cfg, arg):
     created = m.get('created_at') or "-"
     lastlogin = m.get('last_login') or "-"
     loginc = m.get('login_count', 0)
-    return (f"👤 {m.get('username')}{role}\n"
+    text = (f"👤 {m.get('username')}{role}\n"
             f"Status: {st}\n"
             f"Nama: {m.get('display_name') or '-'}\n"
             f"Daftar: {created}\n"
@@ -200,6 +213,15 @@ def _cmd_member(_cfg, arg):
             f"Aktif s/d: {exp}\n"
             f"IP: {m.get('ip') or '-'}\n"
             f"Password: {pw}")
+    markup = {
+        "inline_keyboard": [
+            [{"text": "✏️ Edit", "callback_data": f"/member {m.get('username')}"},
+             {"text": "🔒 Ban/Unban", "callback_data": f"/ban {m.get('username')}"}],
+            [{"text": "➕ Extend", "callback_data": f"/extend {m.get('username')} 30"},
+             {"text": "🔄 Refresh", "callback_data": "/member " + m.get('username')}],
+        ]
+    }
+    return (text, markup)
 
 
 def _cmd_logs(_cfg, n=12):
@@ -876,11 +898,11 @@ def run_bot(stop_evt=None, verbose=True):
                 if not text:
                     continue
                 if text.split()[0].split("@")[0].lower() == "/menu":
-                    reply = handle_message(text)
-                    tg_send(owner_id, reply, reply_markup=_menu_keyboard())
+                    reply, markup = handle_message(text)
+                    tg_send(owner_id, reply, reply_markup=markup if isinstance(markup, dict) else _menu_keyboard())
                 else:
-                    reply = handle_message(text)
-                    tg_send(owner_id, reply)
+                    reply, markup = handle_message(text)
+                    tg_send(owner_id, reply, reply_markup=markup if isinstance(markup, dict) else None)
                 continue
             # --- member / admin (reseller) / calon member ---
             sender = _member_tg(chat_id)
@@ -892,8 +914,8 @@ def run_bot(stop_evt=None, verbose=True):
                 photo = ""
                 if has_photo and msg.get("photo"):
                     photo = msg["photo"][-1]["file_id"]
-                reply = handle_member_message(chat_id, text, has_photo, caption, photo)
-                tg_send(chat_id, reply)
+                reply, markup = handle_member_message(chat_id, text, has_photo, caption, photo)
+                tg_send(chat_id, reply, reply_markup=markup if isinstance(markup, dict) else None)
                 if has_photo and photo:
                     # forward foto bukti ke owner
                     tg_api(cfg.get("tg_bot_token"), "sendPhoto",
