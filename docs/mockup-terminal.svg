@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <defs>
+    <linearGradient id="tbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1117"/><stop offset="1" stop-color="#010409"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00e5ff"/><stop offset="0.5" stop-color="#4f7cff"/><stop offset="1" stop-color="#00e5ff"/>
+    </linearGradient>
+    <linearGradient id="usergrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00e5ff"/><stop offset="1" stop-color="#4f7cff"/>
+    </linearGradient>
+    <linearGradient id="aigrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+    <filter id="softglow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- window -->
+  <rect x="50" y="50" width="1180" height="620" rx="16" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <!-- title bar -->
+  <rect x="50" y="50" width="1180" height="42" rx="16" fill="#161b22"/>
+  <rect x="50" y="74" width="1180" height="18" fill="#161b22"/>
+  <circle cx="80" cy="71" r="7" fill="#ff5f57"/>
+  <circle cx="104" cy="71" r="7" fill="#febc2e"/>
+  <circle cx="128" cy="71" r="7" fill="#28c840"/>
+  <text x="640" y="76" fill="#8b949e" font-size="13" text-anchor="middle" font-family="system-ui,sans-serif">denzyx — Termux (TUI)</text>
+
+  <!-- banner -->
+  <text x="70" y="130" font-size="34" font-weight="900" fill="url(#titleGrad)" filter="url(#softglow)">DENZYX AI</text>
+  <text x="70" y="156" font-size="14" fill="#8b949e">asisten AI · agent ON · tool calling · voice · pentest</text>
+  <rect x="70" y="170" width="1100" height="1" fill="#21262d"/>
+
+  <!-- you -->
+  <text x="70" y="210" font-size="15" fill="url(#usergrad)" font-weight="700">you  ▸</text>
+  <text x="70" y="236" fill="#c9d1d9" font-size="15">cek keamanan website gua dong, ini domain-nya 👉 https://shopku.test</text>
+
+  <!-- ai -->
+  <text x="70" y="276" font-size="15" fill="url(#aigrad)" font-weight="700">denz  ▸</text>
+  <text x="70" y="302" fill="#e6edf3" font-size="15">Gas, Ranah legal &amp; berizin. Gue mulai RECON dulu:</text>
+  <text x="70" y="328" fill="#c9d1d9" font-size="15">  • whois shopku.test — registrar, nameserver, tanggal expire</text>
+  <text x="70" y="348" fill="#c9d1d9" font-size="15">  • DNS records — A/AAAA/CNAME/MX/TXT, subdomain enum</text>
+  <text x="70" y="368" fill="#c9d1d9" font-size="15">  • fingerprint — wappalyzer-style + header keamanan</text>
+  <rect x="70" y="384" width="1100" height="1" fill="#21262d"/>
+
+  <!-- you -->
+  <text x="70" y="424" font-size="15" fill="url(#usergrad)" font-weight="700">you  ▸</text>
+  <text x="70" y="450" fill="#c9d1d9" font-size="15">lanjut ke scanning &amp; deteksi vuln, jangan ngerusak ya</text>
+
+  <!-- ai -->
+  <text x="70" y="490" font-size="15" fill="url(#aigrad)" font-weight="700">denz  ▸</text>
+  <text x="70" y="516" fill="#e6edf3" font-size="15">Siap, tanpa merusak. Scan port + OWASP Top 10:</text>
+  <text x="70" y="542" fill="#c9d1d9" font-size="15">  • nmap -sV — layanan &amp; versi, deteksi default creds</text>
+  <text x="70" y="562" fill="#c9d1d9" font-size="15">  • SQLi / XSS / CSRF / IDOR / LFI / SSRF — PoC aman</text>
+  <text x="70" y="582" fill="#c9d1d9" font-size="15">  • upload → webshell marker non-destruktif, cleanup total</text>
+  <rect x="70" y="600" width="1100" height="1" fill="#21262d"/>
+
+  <!-- prompt -->
+  <text x="70" y="640" font-size="16" fill="#00e5ff" font-weight="700">denzyx@termux:~$</text>
+  <rect x="270" y="628" width="10" height="18" fill="#e6edf3"/>
+</svg>

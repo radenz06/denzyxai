@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f1f"/><stop offset="1" stop-color="#070b16"/>
+    </linearGradient>
+    <linearGradient id="userGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b5bf0"/><stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7aa2ff"/><stop offset="0.5" stop-color="#b79aff"/><stop offset="1" stop-color="#7aa2ff"/>
+    </linearGradient>
+    <linearGradient id="btnGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f7cff"/><stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="gridLine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f7cff" stop-opacity="0.05"/><stop offset="1" stop-color="#4f7cff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="orb1" cx="0.3" cy="0.25" r="0.5">
+      <stop offset="0" stop-color="#4f7cff" stop-opacity="0.18"/><stop offset="1" stop-color="#4f7cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb2" cx="0.75" cy="0.3" r="0.45">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.16"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb3" cx="0.6" cy="0.8" r="0.5">
+      <stop offset="0" stop-color="#06b6d4" stop-opacity="0.12"/><stop offset="1" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="screen"><rect x="80" y="96" width="1120" height="664" rx="12"/></clipPath>
+  </defs>
+
+  <!-- window shadow -->
+  <rect x="60" y="60" width="1160" height="710" rx="18" fill="#000" opacity="0.5"/>
+  <!-- window -->
+  <rect x="60" y="60" width="1160" height="710" rx="18" fill="#141a2e"/>
+  <!-- title bar -->
+  <rect x="60" y="60" width="1160" height="42" rx="18" fill="#1b2340"/>
+  <rect x="60" y="80" width="1160" height="22" fill="#1b2340"/>
+  <circle cx="88" cy="81" r="7" fill="#ff5f57"/>
+  <circle cx="112" cy="81" r="7" fill="#febc2e"/>
+  <circle cx="136" cy="81" r="7" fill="#28c840"/>
+  <rect x="400" y="71" width="420" height="20" rx="10" fill="#0d1326"/>
+  <text x="610" y="85" fill="#8b95ad" font-size="11" text-anchor="middle">https://denzyx.ai/chat</text>
+
+  <!-- page bg -->
+  <g clip-path="url(#screen)">
+    <rect x="80" y="96" width="1120" height="664" fill="url(#bgGrad)"/>
+    <rect x="80" y="96" width="1120" height="664" fill="url(#orb1)"/>
+    <rect x="80" y="96" width="1120" height="664" fill="url(#orb2)"/>
+    <rect x="80" y="96" width="1120" height="664" fill="url(#orb3)"/>
+
+    <!-- appbar -->
+    <rect x="80" y="96" width="1120" height="52" fill="#0a0e1a" opacity="0.85"/>
+    <rect x="80" y="147" width="1120" height="2" fill="url(#accentGrad)" opacity="0.4"/>
+    <rect x="98" y="110" width="26" height="26" rx="8" fill="#1b2440" stroke="#4f7cff" stroke-opacity="0.4"/>
+    <path d="M104 118 l6 6 6-6" stroke="#e9edf7" stroke-width="2.2" fill="none"/>
+    <text x="138" y="126" fill="#e9edf7" font-size="17" font-weight="700">denzyx AI</text>
+    <circle cx="1020" cy="122" r="5" fill="#22c55e"/>
+    <rect x="1030" y="113" width="56" height="18" rx="9" fill="#22c55e" fill-opacity="0.12" stroke="#22c55e" stroke-opacity="0.35"/>
+    <text x="1058" y="126" fill="#22c55e" font-size="10.5" text-anchor="middle">online</text>
+
+    <!-- welcome -->
+    <image href="https://raw.githubusercontent.com/radenz06/denzyxai/main/docs/logo.jpg" x="602" y="182" width="76" height="76" rx="22"/>
+    <text x="640" y="292" fill="#e9edf7" font-size="27" font-weight="700" text-anchor="middle">Halo, Raden!</text>
+    <text x="640" y="318" fill="#8b95ad" font-size="14" text-anchor="middle">Apa yang bisa saya bantu hari ini?</text>
+
+    <!-- suggestion cards -->
+    <rect x="300" y="342" width="160" height="86" rx="16" fill="#181f38" fill-opacity="0.85" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <text x="318" y="370" font-size="20">💬</text>
+    <text x="318" y="396" fill="#c3cde8" font-size="13" font-weight="600">jelaskan cara kerja</text>
+    <text x="318" y="413" fill="#c3cde8" font-size="13" font-weight="600">denzyx AI</text>
+
+    <rect x="470" y="342" width="160" height="86" rx="16" fill="#181f38" fill-opacity="0.85" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <text x="488" y="370" font-size="20">✨</text>
+    <text x="488" y="396" fill="#c3cde8" font-size="13" font-weight="600">buatkan puisi pendek</text>
+
+    <rect x="640" y="342" width="160" height="86" rx="16" fill="#181f38" fill-opacity="0.85" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <text x="658" y="370" font-size="20">💡</text>
+    <text x="658" y="396" fill="#c3cde8" font-size="13" font-weight="600">kode python fibonacci</text>
+
+    <rect x="810" y="342" width="160" height="86" rx="16" fill="#181f38" fill-opacity="0.85" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <text x="828" y="370" font-size="20">🚀</text>
+    <text x="828" y="396" fill="#c3cde8" font-size="13" font-weight="600">rekomendasi anime</text>
+
+    <!-- user bubble -->
+    <rect x="860" y="452" width="280" height="58" rx="18" fill="url(#userGrad)"/>
+    <path d="M860 492 l0 18 14 0" fill="url(#userGrad)"/>
+    <text x="884" y="478" fill="#fff" font-size="14">Halo Denz, cek keamanan</text>
+    <text x="884" y="497" fill="#fff" font-size="14">website gua dong 🔍</text>
+
+    <!-- AI bubble -->
+    <rect x="170" y="542" width="150" height="46" rx="14" fill="#182140" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <text x="192" y="561" font-size="12" fill="#9fb0d8">denzyx AI</text>
+    <text x="192" y="579" fill="#e9edf7" font-size="14">Siap! 👊</text>
+    <rect x="170" y="596" width="300" height="52" rx="18" fill="#182140" stroke="#4f7cff" stroke-opacity="0.2"/>
+    <path d="M170 626 l0 22 -14 0" fill="#182140"/>
+    <text x="192" y="620" fill="#e9edf7" font-size="14">Oke, gue mulai dari recon —</text>
+    <text x="192" y="639" fill="#e9edf7" font-size="14">cuma butuh domainnya aja.</text>
+    <image href="https://raw.githubusercontent.com/radenz06/denzyxai/main/docs/logo.jpg" x="130" y="556" width="34" height="34" rx="10"/>
+
+    <!-- composer -->
+    <rect x="80" y="668" width="1120" height="92" fill="#0a0e1a" fill-opacity="0.9"/>
+    <rect x="210" y="678" width="46" height="24" rx="12" fill="#4f7cff" fill-opacity="0.1" stroke="#4f7cff" stroke-opacity="0.3"/>
+    <text x="233" y="694" fill="#9fb0d8" font-size="11" text-anchor="middle">⚙ model default</text>
+    <rect x="262" y="678" width="86" height="24" rx="12" fill="#4f7cff" fill-opacity="0.1" stroke="#4f7cff" stroke-opacity="0.3"/>
+    <text x="305" y="694" fill="#9fb0d8" font-size="11" text-anchor="middle">+ Chat Baru</text>
+
+    <rect x="250" y="708" width="760" height="46" rx="23" fill="#161d34" stroke="#4f7cff" stroke-opacity="0.35"/>
+    <text x="280" y="735" fill="#5b6b8f" font-size="14">Tanya apa saja...</text>
+    <rect x="950" y="712" width="40" height="40" rx="20" fill="url(#btnGrad)"/>
+    <text x="970" y="738" fill="#fff" font-size="16">➤</text>
+  </g>
+</svg>
