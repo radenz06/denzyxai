@@ -13,10 +13,12 @@ Menu:
   9) Test notifikasi TG
   A) Add member langsung (aktif)
   D) Naikkan/turunkan admin (reseller)
+  E) Hapus member (permanen)
   R) Restart server / bot
 
 CLI:
   python3 admin-denz.py add <user> <pass> [hari]
+  python3 admin-denz.py delete <user>
   python3 admin-denz.py addadmin <user> | rmadmin <user>
   python3 admin-denz.py bans | unban <ip> | block <ip>
   python3 admin-denz.py visitors [ip|cari] | visitors-clear
@@ -192,6 +194,31 @@ def _set_admin(username, admin=True):
     webdenz.save_member(m)
     webdenz.log_activity("addadmin" if admin else "rmadmin", username)
     print(f"  ✅ {username} → {'ADMIN (reseller)' if admin else 'member biasa'}")
+
+
+def _delete_member(username):
+    """Hapus member permanen (file member + sesi + riwayat chat)."""
+    username = (username or "").strip()
+    m = webdenz.load_member(username)
+    if not m:
+        print(f"  ✖ Member tidak ada: {username}")
+        return
+    print(f"  ⚠️  Member: {username} ({m.get('display_name') or '-'})")
+    print(f"      Status: {webdenz.member_status(m)}  "
+          f"terdaftar {m.get('created_at') or '-'}")
+    if input(f"  Yakin hapus {username} PERMANEN? (ketik y): ").strip().lower() != "y":
+        print("  Batal.")
+        return
+    if not webdenz.delete_member(username):
+        print(f"  ✖ Gagal menghapus file member: {username}")
+        return
+    try:
+        webdenz.session_md_path(username).unlink()
+    except OSError:
+        pass
+    webdenz.log_activity("delete", f"{username} (admin-denz)")
+    denzbot.tg_notify(f"🗑️ Owner hapus member: {username} (admin-denz)")
+    print(f"  ✅ {username} dihapus permanen (akun, sesi, riwayat chat).")
 
 
 def _logs(n=12):
@@ -491,6 +518,7 @@ def _menu():
                             [B] IP diblokir WAF
                             [C] Unban IP WAF
                             [D] Naikkan/turunkan admin
+  [E] Hapus member (permanen)
                             [V] Pengunjung web   [W] Hapus data pengunjung
                             [R] Restart server/bot
                             [P] Ganti password lisensi
@@ -530,6 +558,8 @@ def _menu():
         _set_admin(input("  username: ").strip(),
                    admin=input("  jadikan admin? (y/n): ").strip().lower()
                    == "y")
+    elif c == "e":
+        _delete_member(input("  username: ").strip())
     elif c == "v":
         _list_visitors(30)
     elif c == "w":
@@ -579,6 +609,8 @@ def main():
             p = sys.argv[3] if len(sys.argv) > 3 else ""
             d = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4].isdigit() else None
             _add_member(u, p, d)
+        elif arg == "delete":
+            _delete_member(sys.argv[2] if len(sys.argv) > 2 else "")
         elif arg == "addadmin":
             _set_admin(sys.argv[2] if len(sys.argv) > 2 else "", True)
         elif arg == "rmadmin":

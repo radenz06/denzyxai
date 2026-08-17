@@ -28,6 +28,7 @@ import mimetypes
 import os
 import queue
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -820,7 +821,9 @@ def _error_page(code, title, reason="", note=""):
   <p style="margin:12px 0 0;color:var(--mut)">{html.escape(reason)}</p>
   <p style="color:var(--mut)">{html.escape(note)}</p>
   <p style="margin-top:32px;font-size:14px;color:#64748b">pesan dari denzyx 😎</p>
-</div>""" + _sfx_player_html("/sfx/celah.mp3", 1.0)
+</div>"""
+    _tts_speak("LU NGAPAIN SI PUKIMAK, SOK SOKAN NGE-HACK, MATI AJA LU SONO",
+               cooldown=20)
     return page(str(code), body, subtitle="diblokir")
 
 
@@ -830,45 +833,26 @@ def _blocked_page(reason=""):
                        "IP kamu sudah masuk daftar hitam keamanan web ini.")
 
 
-def _sfx_player_html(sfx_path, volume=1.0):
-    """Generate HTML + JS for sound effect player with collision prevention."""
-    return f"""
-<audio id="sfx-player" src="{sfx_path}" preload="auto" style="display:none"></audio>
-<script>
-(function() {{
-  const audio = document.getElementById('sfx-player');
-  if (!audio) return;
-  audio.volume = {volume};
-  
-  // Collision prevention: pause any other playing audio
-  document.querySelectorAll('audio').forEach(a => {{
-    if (a !== audio && !a.paused) {{
-      a.pause();
-      a.currentTime = 0;
-    }}
-  }});
-  
-// Try autoplay (may be blocked by browser policy)
-  const tryPlay = () => {{
-    const p = audio.play();
-    if (p !== undefined) p.catch(() => {{}});
-  }};
-  tryPlay();
-  audio.addEventListener('loadeddata', () => {{ if (audio.paused) tryPlay(); }});
-  audio.addEventListener('canplay', () => {{ if (audio.paused) tryPlay(); }});
+_TTS_LAST = [0.0]
 
-  // Autoplay blocked - unlock on first user interaction (any kind)
-  const unlock = () => {{
-    tryPlay();
-    ['click','keydown','touchstart','pointerdown'].forEach(ev => {{
-      document.removeEventListener(ev, unlock);
-    }});
-  }};
-  ['click','keydown','touchstart','pointerdown'].forEach(ev => {{
-    document.addEventListener(ev, unlock, {{once: true}});
-  }});
-}})();
-</script>"""
+
+def _tts_speak(text, cooldown=0.0):
+    """Auto sound via termux-tts-speak (nada agak neken & ngebentak).
+
+    Nada: pitch 0.6 (rendah, tegas), rate 0.85 (pelan, neken).
+    Dipakai untuk pengumuman login / registrasi / percobaan hack.
+    """
+    import time
+    now = time.time()
+    if now - _TTS_LAST[0] < cooldown:
+        return
+    _TTS_LAST[0] = now
+    try:
+        subprocess.Popen(
+            ["termux-tts-speak", "-p", "0.6", "-r", "0.85", text],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _qr_source(cfg):
@@ -920,7 +904,6 @@ def _login_page(cfg, msg="", err=""):
 
 def _register_page(cfg, msg="", err="", m=None):
     pay = ""
-    reg_success = m is not None and msg and "Berhasil daftar" in msg
     if m and member_status(m) == "pending":
         pay = f"""<div class="paycard">{_qr_html(cfg)}
 <b>Langkah aktivasi:</b><br>
@@ -947,7 +930,7 @@ def _register_page(cfg, msg="", err="", m=None):
 <button type="submit">Daftar &amp; Langganan </button></form>
 <div class="auth-switch">Sudah daftar? <a href="/login">Login</a></div>
 </div></div>"""
-    return page("Registrasi", body + (_sfx_player_html("/sfx/registberhasil.mp3", 1.0) if reg_success else ""))
+    return page("Registrasi", body)
 
 
 def _flash(msg, err):
@@ -1366,7 +1349,7 @@ document.getElementById('mclear').onclick=async()=>{{
  g.querySelectorAll('.wcard').forEach(el=>el.onclick=()=>{{inp.value=CARDS[+el.dataset.i];autofit();hideSug();fm.requestSubmit();}});
 }})();
 window.addEventListener('scroll',()=>{{const l=msgs.lastElementChild;if(l&&nearBottom())l.scrollIntoView({{block:'nearest'}});}});
-</script>""" + (_sfx_player_html("/sfx/loginberhasil.mp3", 1.0) if login_success else ""), logged_in=True)
+</script>""", logged_in=True)
 
 
 def _status_page(m):
@@ -1414,7 +1397,13 @@ def _owner_page(cfg, msg="", err="", q="", pg=1):
         rows.append(f"<tr><td>{html_esc(m['username'])}{role_tag}</td>"
                     f"<td>{html_esc(m.get('display_name', '-'))}</td>"
                     f"<td>{badge}</td><td>{html_esc(m.get('expires_at') or '-')}</td>"
-                    f"<td><a href='/owner/member/{html_esc(m['username'])}'>detail</a></td></tr>")
+                    f"<td><a href='/owner/member/{html_esc(m['username'])}'>detail</a> "
+                    f"<form method='post' action='/owner/member/{html_esc(m['username'])}' "
+                    f"style='display:inline' onsubmit=\"return confirm("
+                    f"'Hapus {html_esc(m['username'])} PERMANEN? Data chat &amp; password ikut terhapus.')\">"
+                    f"<input type='hidden' name='_csrf' value='__CSRF__'>"
+                    f"<input type='hidden' name='action' value='delete'>"
+                    f"<button class='danger' style='padding:2px 8px;font-size:12px'>hapus</button></form></td></tr>")
     table = ("<table><tr><th>username</th><th>nama</th><th>status</th>"
              "<th>aktif s/d</th><th></th></tr>" + "".join(rows) + "</table>")
     qsafe = html_esc(q)
@@ -2303,12 +2292,6 @@ class Handler(BaseHTTPRequestHandler):
             self._html(_register_page(cfg).encode())
         elif path == "/qr":
             self._serve_qr(cfg)
-        elif path == "/sfx/celah.mp3":
-            self._serve_sfx_celah()
-        elif path == "/sfx/loginberhasil.mp3":
-            self._serve_sfx_login_berhasil()
-        elif path == "/sfx/registberhasil.mp3":
-            self._serve_sfx_regist_berhasil()
         elif path == "/status":
             if not m:
                 self._redirect("/login")
@@ -2567,58 +2550,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, Path(qr).read_bytes(), ctype,
                    headers={"Cache-Control": "public, max-age=3600"})
 
-    def _serve_sfx(self, name):
-        """Sajikan file suara dengan dukungan Range (206) biar audio
-        langsung streaming, apalagi file-nya gede (10-20MB)."""
-        p = Path(f"/storage/emulated/0/auto voice/{name}.web.mp3")
-        if not p.exists():
-            self._send(404, "sfx not found")
-            return
-        size = p.stat().st_size
-        base = {"Cache-Control": "public, max-age=3600",
-                "Accept-Ranges": "bytes"}
-        rng = self.headers.get("Range", "").strip()
-        if rng.startswith("bytes="):
-            try:
-                a, b = rng[6:].split("-", 1)
-                start = int(a) if a else 0
-                end = int(b) if b else size - 1
-                if start < 0 or end >= size or start > end:
-                    raise ValueError
-            except ValueError:
-                self._send(416, b"", "audio/mpeg", headers=base)
-                return
-            body = self._read_partial(p, start, end)
-            self._send(206, body, "audio/mpeg",
-                       headers={**base,
-                                "Content-Range": f"bytes {start}-{end}/{size}"})
-        else:
-            self._send(200, Path(p).read_bytes(), "audio/mpeg", headers=base)
-
-    @staticmethod
-    def _read_partial(p, start, end):
-        chunk = 65536
-        buf = bytearray()
-        with open(p, "rb") as f:
-            f.seek(start)
-            remaining = end - start + 1
-            while remaining > 0:
-                data = f.read(min(chunk, remaining))
-                if not data:
-                    break
-                buf += data
-                remaining -= len(data)
-        return bytes(buf)
-
-    def _serve_sfx_celah(self):
-        self._serve_sfx("celah")
-
-    def _serve_sfx_login_berhasil(self):
-        self._serve_sfx("loginberhasil")
-
-    def _serve_sfx_regist_berhasil(self):
-        self._serve_sfx("registberhasil")
-
     def _post_login(self, cfg, data):
         if not self._rate_limit(f"login:{self._ip()}", cfg.get("rate_max_attempts", 8),
                                 cfg.get("rate_window_sec", 600)):
@@ -2653,6 +2584,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         tok = issue_member_session(username, self._ip())
         self._login_notify(username)
+        nama = m.get("display_name") or username
+        _tts_speak(f"SELAMAT YA {nama}, LU UDAH LOGIN")
         self._redirect("/chat?login=success", {"Set-Cookie": _cookie(
             "denz_member", tok, secure=getattr(self, "_secure", False))})
 
@@ -2673,6 +2606,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         create_member(username, password, display, self._ip())
         self._reg_notify(username, display)
+        _tts_speak(f"WELCOME JMBUT, MAKASIH UDAH LOGIN SEBAGAI "
+                   f"{display or username}, JANGAN LUPA BAYAR YA MBUD")
         m = load_member(username)
         self._html(_register_page(
             cfg, msg=f"Berhasil daftar, {username}.", m=m).encode())
